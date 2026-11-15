@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
     tags: ["v*"]
+  pull_request:
 
 permissions:
   contents: write
@@ -12,10 +13,26 @@ jobs:
   windows:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
       - run: cargo build --release
+
+      # Test réel : le moteur complet (WMI + Windows Update + Catalogue) tourne sur le runner.
+      - name: Démarrer Windows Update sur le runner
+        shell: pwsh
+        run: |
+          Set-Service wuauserv -StartupType Manual
+          Start-Service wuauserv
+      - name: Test réel --scan
+        run: target\release\mesdrivers.exe --scan
+      - name: Test réel --catalog (Intel Wi-Fi connu)
+        run: target\release\mesdrivers.exe --catalog "PCI\VEN_8086&DEV_51F1"
+
       - name: Publier la release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2

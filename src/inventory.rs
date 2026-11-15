@@ -33,6 +33,7 @@ pub fn scan(con: &WMIConnection) -> Result<(Vec<Device>, Vec<BrokenDevice>), wmi
                 version: d.driver_version.unwrap_or_default(),
                 date: wmi_date(d.driver_date.as_deref().unwrap_or_default()),
                 hwid: d.hardware_id.unwrap_or_default(),
+                ..Default::default()
             })
         })
         .collect();

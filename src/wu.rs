@@ -19,7 +19,7 @@ impl Wu {
     pub fn search(&mut self) -> Result<Vec<Update>> {
         unsafe {
             let searcher = self.session.CreateUpdateSearcher()?;
-            let result = searcher.Search(&BSTR::from("IsInstalled=0 and Type='Driver'"))?;
+            let result = searcher.Search(&BSTR::from("IsInstalled=0 and Type='Driver' and IsHidden=0"))?;
             let list = result.Updates()?;
             self.found.clear();
             let mut out = Vec::new();
@@ -38,20 +38,20 @@ impl Wu {
         }
     }
 
-    /// Télécharge puis installe les mises à jour aux index donnés. Renvoie un résumé lisible.
-    pub fn install(&self, picks: &[usize]) -> Result<String> {
+    pub fn title(&self, i: usize) -> String {
+        self.found.get(i).and_then(|u| unsafe { u.Title() }.ok()).map_or_else(|| format!("pilote n°{i}"), |t| t.to_string())
+    }
+
+    /// Télécharge puis installe la mise à jour n° `i` de la dernière recherche.
+    /// Renvoie (réussi, redémarrage nécessaire).
+    pub fn install_one(&self, i: usize) -> Result<(bool, bool)> {
+        let Some(u) = self.found.get(i) else { return Ok((false, false)) };
         unsafe {
+            if !u.EulaAccepted()?.as_bool() {
+                u.AcceptEula()?;
+            }
             let coll: IUpdateCollection = CoCreateInstance(&UpdateCollection, None, CLSCTX_INPROC_SERVER)?;
-            for &i in picks {
-                let Some(u) = self.found.get(i) else { continue };
-                if !u.EulaAccepted()?.as_bool() {
-                    u.AcceptEula()?;
-                }
-                coll.Add(u)?;
-            }
-            if coll.Count()? == 0 {
-                return Ok("Rien à installer.".into());
-            }
+            coll.Add(u)?;
 
             let dl = self.session.CreateUpdateDownloader()?;
             dl.SetUpdates(&coll)?;
@@ -60,13 +60,7 @@ impl Wu {
             let inst = self.session.CreateUpdateInstaller()?;
             inst.SetUpdates(&coll)?;
             let res = inst.Install()?;
-
-            let n = coll.Count()?;
-            let ok = (0..n)
-                .filter(|&i| res.GetUpdateResult(i).and_then(|r| r.ResultCode()).is_ok_and(|c| c == orcSucceeded))
-                .count();
-            let reboot = if res.RebootRequired()?.as_bool() { " Redémarrage nécessaire." } else { "" };
-            Ok(format!("{ok}/{n} pilote(s) installé(s).{reboot}"))
+            Ok((res.ResultCode()? == orcSucceeded, res.RebootRequired()?.as_bool()))
         }
     }
 }

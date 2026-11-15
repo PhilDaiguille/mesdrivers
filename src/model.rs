@@ -7,6 +7,19 @@ pub struct Device {
     pub version: String,
     pub date: String,
     pub hwid: String,
+    pub catalog: Catalog,
+}
+
+/// Résultat de la vérification dans le Catalogue Microsoft Update.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub enum Catalog {
+    /// Pas vérifié (Microsoft, bus ignoré) ou pas encore de réponse.
+    #[default]
+    Skipped,
+    Pending,
+    NotFound,
+    Found { version: String, date: String, title: String },
+    Error(String),
 }
 
 #[derive(Debug, Clone)]
@@ -60,6 +73,31 @@ pub fn current_version<'a>(devices: &'a [Device], update_hwid: &str) -> Option<&
         .map(|d| d.version.as_str())
 }
 
+/// Compare deux versions "a.b.c.d" segment par segment (numérique, segments absents = 0).
+pub fn cmp_version(a: &str, b: &str) -> std::cmp::Ordering {
+    let parse = |s: &str| s.trim().split('.').map(|p| p.trim().parse::<u64>().unwrap_or(0)).collect::<Vec<_>>();
+    let (a, b) = (parse(a), parse(b));
+    (0..a.len().max(b.len()))
+        .map(|i| a.get(i).unwrap_or(&0).cmp(b.get(i).unwrap_or(&0)))
+        .find(|o| o.is_ne())
+        .unwrap_or(std::cmp::Ordering::Equal)
+}
+
+/// Index des lignes à afficher : `rows` = (texte, fourni par Microsoft ?).
+pub fn visible<'a>(rows: impl Iterator<Item = (&'a str, bool)>, query: &str, hide_ms: bool) -> Vec<usize> {
+    let q = query.to_lowercase();
+    rows.enumerate()
+        .filter(|(_, (text, ms))| !(hide_ms && *ms) && (q.is_empty() || text.to_lowercase().contains(&q)))
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// Secondes Unix -> "AAAA-MM-JJ HH:MM UTC" (pour le journal).
+pub fn stamp(unix_secs: u64) -> String {
+    let (day, rem) = (unix_secs / 86_400, unix_secs % 86_400);
+    format!("{} {:02}:{:02} UTC", ole_date(day as f64 + 25569.0), rem / 3600, rem % 3600 / 60)
+}
+
 /// Code d'erreur du Gestionnaire de périphériques -> libellé court.
 pub fn error_label(code: u32) -> &'static str {
     match code {
@@ -87,6 +125,31 @@ mod tests {
         assert_eq!(ole_date(25569.0), "1970-01-01");
         assert_eq!(ole_date(45000.5), "2023-03-15");
         assert_eq!(ole_date(36526.0), "2000-01-01");
+    }
+
+    #[test]
+    fn versions() {
+        use std::cmp::Ordering::*;
+        assert_eq!(cmp_version("31.0.101.5590", "31.0.101.4502"), Greater);
+        assert_eq!(cmp_version("24.40.0.4", "24.40.0.4"), Equal);
+        assert_eq!(cmp_version("1.2", "1.2.0.0"), Equal);
+        assert_eq!(cmp_version("1.10", "1.9"), Greater);
+        assert_eq!(cmp_version("abc", "0.0.1"), Less);
+    }
+
+    #[test]
+    fn filtering() {
+        let rows = [("Intel Wi-Fi", false), ("Volume", true), ("Realtek Audio", false)];
+        assert_eq!(visible(rows.into_iter(), "", false), [0, 1, 2]);
+        assert_eq!(visible(rows.into_iter(), "", true), [0, 2]);
+        assert_eq!(visible(rows.into_iter(), "AUDIO", true), [2]);
+        assert_eq!(visible(rows.into_iter(), "vol", true), [] as [usize; 0]);
+    }
+
+    #[test]
+    fn journal_stamp() {
+        assert_eq!(stamp(0), "1970-01-01 00:00 UTC");
+        assert_eq!(stamp(1_763_221_800), "2025-11-15 15:50 UTC");
     }
 
     #[test]
