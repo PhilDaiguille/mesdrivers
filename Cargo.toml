@@ -1,6 +1,6 @@
 [package]
 name = "mesdrivers"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2024"
 description = "Détection et mise à jour des pilotes Windows via Windows Update (TUI)"
 license = "MIT"

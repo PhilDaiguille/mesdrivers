@@ -152,8 +152,8 @@ pub fn base64(bytes: &[u8]) -> String {
     out
 }
 
-/// Télécharge le .cab d'une mise à jour du Catalogue dans `dir` et vérifie son SHA-1.
-pub fn download(agent: &ureq::Agent, id: &str, dir: &std::path::Path) -> Result<std::path::PathBuf, String> {
+/// URL HTTPS du .cab et son empreinte SHA-1 (base64) pour une mise à jour du Catalogue.
+pub fn download_info(agent: &ureq::Agent, id: &str) -> Result<(String, String), String> {
     let ids = format!(r#"[{{"size":0,"languages":"","uidInfo":"{id}","updateID":"{id}"}}]"#);
     let js = agent
         .post("https://www.catalog.update.microsoft.com/DownloadDialog.aspx")
@@ -164,10 +164,15 @@ pub fn download(agent: &ureq::Agent, id: &str, dir: &std::path::Path) -> Result<
     if !url.starts_with("https://") {
         return Err(format!("Catalogue : lien refusé (pas HTTPS) {url}"));
     }
+    Ok((url, digest))
+}
 
+/// Télécharge le .cab dans `dir` et vérifie son SHA-1 contre l'empreinte du Catalogue.
+pub fn download(agent: &ureq::Agent, url: &str, digest: &str, dir: &std::path::Path) -> Result<std::path::PathBuf, String> {
+    let name = url.rsplit('/').next().filter(|n| n.ends_with(".cab")).unwrap_or("pilote.cab");
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-    let path = dir.join(format!("{id}.cab"));
-    let mut resp = agent.get(&url).call().map_err(|e| format!("Téléchargement : {e}"))?;
+    let path = dir.join(name);
+    let mut resp = agent.get(url).call().map_err(|e| format!("Téléchargement : {e}"))?;
     let mut reader = resp.body_mut().with_config().limit(4 << 30).reader();
     let mut file = std::fs::File::create(&path).map_err(|e| e.to_string())?;
     let mut sha = sha1_smol::Sha1::new();
@@ -234,7 +239,7 @@ mod tests {
     }
 
     #[test]
-    fn download_info() {
+    fn parses_download_info() {
         let js = "downloadInformation[0].files[0].url = 'https://catalog.s.download.windowsupdate.com/d/x.cab';\n\
                   downloadInformation[0].files[0].digest = 'Knt//8a9N/UJPGoCYfmupFrEdfQ=';";
         assert_eq!(
@@ -265,7 +270,8 @@ mod tests {
         let agent = agent();
         let Catalog::Found { id, .. } = check(&agent, r"PCI\VEN_8086&DEV_51F1") else { panic!("rien trouvé") };
         let dir = std::env::temp_dir().join("mesdrivers-test");
-        let cab = download(&agent, &id, &dir).expect("téléchargement");
+        let (url, digest) = download_info(&agent, &id).expect("info");
+        let cab = download(&agent, &url, &digest, &dir).expect("téléchargement");
         assert!(std::fs::metadata(&cab).unwrap().len() > 1_000_000);
         let _ = std::fs::remove_dir_all(dir);
     }

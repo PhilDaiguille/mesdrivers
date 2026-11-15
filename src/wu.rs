@@ -29,6 +29,7 @@ impl Wu {
                 out.push(Update {
                     source: Source::Wu(self.found.len()),
                     version: String::new(),
+                    devices: Vec::new(),
                     title: u.Title()?.to_string(),
                     provider: d.DriverProvider()?.to_string(),
                     hwid: d.DriverHardwareID()?.to_string(),

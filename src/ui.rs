@@ -1,5 +1,5 @@
 //! Rendu de l'interface (aucune logique métier ici).
-use crate::model::{Catalog, Source, cmp_version, current_version, error_label, human_size};
+use crate::model::{Catalog, Source, cmp_version, current_version, display_date, error_label, human_size};
 use crate::{App, Input, MAJ, MATERIEL, RESUME, SAUVEGARDE, STORE};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -85,7 +85,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
                         Cell::from(d.name.clone()),
                         Cell::from(d.provider.clone()),
                         Cell::from(d.version.clone()),
-                        Cell::from(d.date.clone()),
+                        Cell::from(display_date(&d.date)).fg(if d.date.starts_with("19") { Color::DarkGray } else { Color::Reset }),
                         catalog_cell(&d.catalog, &d.version),
                     ])
                 }
@@ -106,7 +106,18 @@ pub fn draw(f: &mut Frame, app: &mut App) {
                     Source::Catalog(_) => Cell::from("Catalogue").yellow(),
                 };
                 let new = if u.version.is_empty() { "voir titre".to_string() } else { u.version.clone() };
-                Row::new([Cell::from(check(app.checked.contains(&u.key()))), src, Cell::from(u.title.clone()), Cell::from(cur.to_string()), Cell::from(new), Cell::from(u.date.clone())])
+                let title = match u.devices.len() {
+                    0 | 1 => u.title.clone(),
+                    n => format!("{} · {n} périphériques", u.title),
+                };
+                Row::new([
+                    Cell::from(check(app.checked.contains(&u.key()))),
+                    src,
+                    Cell::from(title),
+                    Cell::from(cur.to_string()),
+                    Cell::from(new),
+                    Cell::from(display_date(&u.date)),
+                ])
             });
             let widths = [
                 Constraint::Length(3),
@@ -139,7 +150,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
                     Cell::from(p.provider.clone()),
                     Cell::from(p.class.clone()),
                     Cell::from(p.version.clone()),
-                    Cell::from(p.date.clone()),
+                    Cell::from(display_date(&p.date)),
                     Cell::from(human_size(p.size)),
                     Cell::from(state).fg(color),
                 ])
@@ -221,10 +232,15 @@ fn detail_lines(app: &App, updates: &[crate::model::Update]) -> Vec<Line<'static
         MAJ => {
             let Some(u) = app.selected().and_then(|i| updates.get(i)) else { return none() };
             let cur = current_version(&app.devices, &u.hwid).unwrap_or("inconnue");
+            let concerne = if u.devices.is_empty() { u.hwid.clone() } else { u.devices.join(", ") };
+            let mut date = display_date(&u.date);
+            if date != u.date {
+                date += " : date volontairement ancienne (convention Intel chipset), seule la version compte";
+            }
             vec![
                 Line::from(u.title.clone()).bold(),
-                line("HardwareID  ", u.hwid.clone()),
-                line("Version     ", format!("{cur} → {}   ({}, {})", if u.version.is_empty() { "voir titre" } else { &u.version }, u.provider, u.date)),
+                line("Concerne    ", format!("{} : {concerne}", u.devices.len().max(1))),
+                line("Version     ", format!("{cur} → {}   ({}, {date})", if u.version.is_empty() { "voir titre" } else { &u.version }, u.provider)),
             ]
         }
         STORE => {
@@ -238,7 +254,7 @@ fn detail_lines(app: &App, updates: &[crate::model::Update]) -> Vec<Line<'static
             };
             vec![
                 Line::from(format!("{} ({})", p.original, p.oem)).bold(),
-                line("Fabricant   ", format!("{} · {} · {} du {} · {}", p.provider, p.class, p.version, p.date, human_size(p.size))),
+                line("Fabricant   ", format!("{} · {} · {} ({}) · {}", p.provider, p.class, p.version, display_date(&p.date), human_size(p.size))),
                 line("État        ", why.to_string()),
             ]
         }
@@ -262,10 +278,10 @@ fn detail_lines(app: &App, updates: &[crate::model::Update]) -> Vec<Line<'static
                 Catalog::Pending => "vérification en cours…".to_string(),
                 Catalog::NotFound => "aucun pilote Windows 10/11 publié pour ce matériel".to_string(),
                 Catalog::Error(e) => format!("erreur : {e}"),
-                Catalog::Found { version, date, title, .. } => format!("{version} du {date} ({title}) · o pour ouvrir"),
+                Catalog::Found { version, date, title, .. } => format!("{version} ({}) · {title} · o pour ouvrir", display_date(date)),
             };
             vec![
-                Line::from(vec![Span::from(d.name.clone()).bold(), Span::from(format!("   {} · {} · {} · {}", d.provider, d.version, d.date, d.inf))]),
+                Line::from(vec![Span::from(d.name.clone()).bold(), Span::from(format!("   {} · {} · {} · {}", d.provider, d.version, display_date(&d.date), d.inf))]),
                 line("HardwareID  ", d.hwid.clone()),
                 line("Catalogue   ", cat),
             ]

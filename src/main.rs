@@ -16,7 +16,7 @@ mod system;
 #[cfg(windows)]
 mod wu;
 
-use model::{BrokenDevice, Catalog, Device, Package, Source, Update, cmp_version, visible};
+use model::{BrokenDevice, Device, Package, Source, Update, visible};
 use ratatui::DefaultTerminal;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use ratatui::widgets::TableState;
@@ -66,25 +66,10 @@ struct App {
 }
 
 impl App {
-    /// Windows Update + pilotes plus récents trouvés au Catalogue (un par matériel).
+    /// Windows Update + pilotes plus récents trouvés au Catalogue (regroupés par paquet).
     fn updates(&self) -> Vec<Update> {
         let mut out = self.wu_updates.clone();
-        let mut seen = HashSet::new();
-        for d in &self.devices {
-            if let Catalog::Found { id, version, date, title } = &d.catalog
-                && cmp_version(version, &d.version).is_gt()
-                && seen.insert(id.clone())
-            {
-                out.push(Update {
-                    source: Source::Catalog(id.clone()),
-                    title: title.clone(),
-                    provider: d.provider.clone(),
-                    hwid: d.hwid.clone(),
-                    date: date.clone(),
-                    version: version.clone(),
-                });
-            }
-        }
+        out.extend(model::catalog_updates(&self.devices));
         out
     }
     /// Index d'origine des lignes visibles. Matériel : 0..broken.len() = en erreur, puis les pilotes.
@@ -123,7 +108,7 @@ impl App {
         for u in self.updates().into_iter().filter(|u| self.checked.contains(&u.key())) {
             match u.source {
                 Source::Wu(i) => wu.push(i),
-                Source::Catalog(id) => catalog.push((id, u.title)),
+                Source::Catalog(ids) => catalog.extend(ids.into_iter().map(|id| (id, u.title.clone()))),
             }
         }
         Cmd::Install { wu, catalog, skip_restore: false }

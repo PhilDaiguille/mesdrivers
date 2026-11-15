@@ -31,7 +31,14 @@ pub fn catalog_get(hwid: &str, dir: &Path) -> i32 {
         return 1;
     };
     println!("Trouvé : {title} ({version})");
-    match crate::worker::fetch_catalog_package(&agent, &id, dir) {
+    let info = match crate::catalog::download_info(&agent, &id) {
+        Ok(i) => i,
+        Err(e) => {
+            eprintln!("ERREUR : {e}");
+            return 1;
+        }
+    };
+    match crate::worker::fetch_catalog_package(&agent, &id, &info, dir) {
         Ok(target) => {
             let files = crate::pnputil::files(&target);
             let infs = files.iter().filter(|f| f.extension().is_some_and(|e| e.eq_ignore_ascii_case("inf"))).count();

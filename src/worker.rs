@@ -70,10 +70,11 @@ pub fn check_catalog(devices: &mut [Device], tx: &Sender<Msg>) {
 
 /// Télécharge (SHA-1 vérifié) et extrait un paquet du Catalogue dans `base\<id>` ;
 /// refuse s'il ne vise pas l'architecture du PC.
-pub fn fetch_catalog_package(agent: &ureq::Agent, id: &str, base: &std::path::Path) -> Result<PathBuf, String> {
+/// `info` = (URL, empreinte SHA-1) lue par `catalog::download_info`.
+pub fn fetch_catalog_package(agent: &ureq::Agent, id: &str, info: &(String, String), base: &std::path::Path) -> Result<PathBuf, String> {
     let dir = base.join(id);
     let _ = std::fs::remove_dir_all(&dir);
-    let cab = crate::catalog::download(agent, id, &dir)?;
+    let cab = crate::catalog::download(agent, &info.0, &info.1, &dir)?;
     let out = dir.join("pilote");
     crate::pnputil::expand_cab(&cab, &out)?;
     if !crate::pnputil::has_inf_for_this_arch(&out) {
@@ -231,10 +232,23 @@ fn run(rx: Receiver<Cmd>, tx: Sender<Msg>) {
                     });
                 }
                 let tmp = std::env::temp_dir().join("mesdrivers");
+                // Le même .cab peut être publié sous plusieurs ids (un par matériel) : on ne l'installe qu'une fois.
+                let mut done_digests = std::collections::HashSet::new();
                 for (id, title) in &catalog {
                     k += 1;
+                    let info = match crate::catalog::download_info(&agent, id) {
+                        Ok(i) => i,
+                        Err(e) => {
+                            journal(format!("ERREUR  Catalogue  {title} : {e}"));
+                            continue;
+                        }
+                    };
+                    if !done_digests.insert(info.1.clone()) {
+                        ok += 1; // même paquet, déjà installé dans ce lot
+                        continue;
+                    }
                     say(format!("{k}/{n} : {title} (Catalogue : téléchargement)…"));
-                    let r = fetch_catalog_package(&agent, id, &tmp).and_then(|dir| {
+                    let r = fetch_catalog_package(&agent, id, &info, &tmp).and_then(|dir| {
                         say(format!("{k}/{n} : {title} (installation)…"));
                         crate::pnputil::add_dir(&dir)
                     });

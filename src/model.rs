@@ -34,8 +34,8 @@ pub struct BrokenDevice {
 pub enum Source {
     /// Index dans la dernière recherche Windows Update.
     Wu(usize),
-    /// Id de mise à jour du Catalogue Microsoft.
-    Catalog(String),
+    /// Ids du Catalogue Microsoft : Intel publie le même paquet sous un id par matériel visé.
+    Catalog(Vec<String>),
 }
 
 #[derive(Debug, Clone)]
@@ -47,6 +47,8 @@ pub struct Update {
     pub date: String,
     /// Connue pour le Catalogue, vide pour Windows Update (elle est dans le titre).
     pub version: String,
+    /// Périphériques concernés (Catalogue).
+    pub devices: Vec<String>,
 }
 
 impl Update {
@@ -54,7 +56,7 @@ impl Update {
     pub fn key(&self) -> String {
         match &self.source {
             Source::Wu(i) => format!("wu:{i}"),
-            Source::Catalog(id) => format!("cat:{id}"),
+            Source::Catalog(_) => format!("cat:{}|{}", self.title, self.version),
         }
     }
 }
@@ -71,6 +73,46 @@ pub struct Package {
     pub size: u64,
     pub in_use: bool,
     pub obsolete: bool,
+}
+
+/// Mises à jour Catalogue plus récentes que l'installé, regroupées par (titre, version) :
+/// 6 contrôleurs I2C qui partagent le même pilote donnent une seule ligne.
+pub fn catalog_updates(devices: &[Device]) -> Vec<Update> {
+    let mut out: Vec<Update> = Vec::new();
+    for d in devices {
+        let Catalog::Found { id, version, date, title } = &d.catalog else { continue };
+        if !cmp_version(version, &d.version).is_gt() {
+            continue;
+        }
+        match out.iter_mut().find(|u| u.title == *title && u.version == *version) {
+            Some(u) => {
+                if let Source::Catalog(ids) = &mut u.source
+                    && !ids.contains(id)
+                {
+                    ids.push(id.clone());
+                }
+                u.devices.push(d.name.clone());
+            }
+            None => out.push(Update {
+                source: Source::Catalog(vec![id.clone()]),
+                title: title.clone(),
+                provider: d.provider.clone(),
+                hwid: d.hwid.clone(),
+                date: date.clone(),
+                version: version.clone(),
+                devices: vec![d.name.clone()],
+            }),
+        }
+    }
+    out
+}
+
+/// Les INF chipset Intel sont datés 1968 exprès (pour ne jamais passer devant un vrai pilote).
+pub fn display_date(d: &str) -> String {
+    match d.get(..4).and_then(|y| y.parse::<u32>().ok()) {
+        Some(y) if y < 1990 => "non datée".into(),
+        _ => d.to_string(),
+    }
 }
 
 /// Obsolète = inutilisé ET une version plus récente du même INF d'origine est en service.
@@ -221,6 +263,32 @@ mod tests {
         assert_eq!(pkgs.iter().map(|p| p.obsolete).collect::<Vec<_>>(), [false, true, false, false, false]);
         assert_eq!(human_size(1_500_000_000), "1,4 Go");
         assert_eq!(human_size(2048), "2,0 Ko");
+    }
+
+    #[test]
+    fn groups_catalog_updates() {
+        let dev = |name: &str, id: &str, title: &str, cur: &str, new: &str| Device {
+            name: name.into(),
+            version: cur.into(),
+            catalog: Catalog::Found { id: id.into(), version: new.into(), date: "2025-07-29".into(), title: title.into() },
+            ..Default::default()
+        };
+        let t = "Intel Corporation System Driver Update (30.100.2531.31)";
+        let devs = vec![
+            dev("I2C 7A4C", "a", t, "30.100.2417.30", "30.100.2531.31"),
+            dev("I2C 7A4D", "b", t, "30.100.2417.30", "30.100.2531.31"),
+            dev("I2C 7A4E", "b", t, "30.100.2417.30", "30.100.2531.31"),
+            dev("PEG10", "c", "INTEL System Driver Update (10.1.45.10)", "10.1.45.9", "10.1.45.10"),
+            dev("SMBus", "d", "déjà à jour", "10.1.46.5", "10.1.46.5"),
+        ];
+        let u = catalog_updates(&devs);
+        assert_eq!(u.len(), 2);
+        assert_eq!(u[0].source, Source::Catalog(vec!["a".into(), "b".into()]));
+        assert_eq!(u[0].devices.len(), 3);
+        assert_eq!(u[0].key(), format!("cat:{t}|30.100.2531.31"));
+        assert_eq!(display_date("1968-07-18"), "non datée");
+        assert_eq!(display_date("2025-07-29"), "2025-07-29");
+        assert_eq!(display_date(""), "");
     }
 
     #[test]

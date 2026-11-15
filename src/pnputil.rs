@@ -20,7 +20,8 @@ pub fn add_dir(dir: &Path) -> Result<bool, String> {
     match code {
         0 => Ok(false),
         3010 => Ok(true), // ERROR_SUCCESS_REBOOT_REQUIRED
-        259 => Err("pilote ajouté au magasin, mais aucun périphérique ne l'a pris (pas meilleur que l'actuel)".into()),
+        // ERROR_NO_MORE_ITEMS : paquet ajouté au magasin, Windows garde l'actuel (équivalent ou meilleur).
+        259 => Ok(false),
         _ => Err(format!("pnputil code {code} : {}", last_line(&out))),
     }
 }
