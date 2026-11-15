@@ -31,15 +31,8 @@ pub fn catalog_get(hwid: &str, dir: &Path) -> i32 {
         return 1;
     };
     println!("Trouvé : {title} ({version})");
-    match crate::worker::fetch_catalog_package(&agent, &id) {
-        Ok(out) => {
-            let target = dir.join(&id);
-            let _ = std::fs::create_dir_all(dir);
-            let _ = std::fs::remove_dir_all(&target);
-            if let Err(e) = std::fs::rename(&out, &target) {
-                eprintln!("Copie vers {} impossible : {e}", target.display());
-                return 1;
-            }
+    match crate::worker::fetch_catalog_package(&agent, &id, dir) {
+        Ok(target) => {
             let files = crate::pnputil::files(&target);
             let infs = files.iter().filter(|f| f.extension().is_some_and(|e| e.eq_ignore_ascii_case("inf"))).count();
             println!("OK : SHA-1 vérifié, {} fichiers dont {infs} .inf pour cette architecture -> {}", files.len(), target.display());

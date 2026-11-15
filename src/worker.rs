@@ -68,9 +68,10 @@ pub fn check_catalog(devices: &mut [Device], tx: &Sender<Msg>) {
     }
 }
 
-/// Télécharge (SHA-1 vérifié) et extrait un paquet du Catalogue ; refuse s'il ne vise pas l'architecture du PC.
-pub fn fetch_catalog_package(agent: &ureq::Agent, id: &str) -> Result<PathBuf, String> {
-    let dir = std::env::temp_dir().join("mesdrivers").join(id);
+/// Télécharge (SHA-1 vérifié) et extrait un paquet du Catalogue dans `base\<id>` ;
+/// refuse s'il ne vise pas l'architecture du PC.
+pub fn fetch_catalog_package(agent: &ureq::Agent, id: &str, base: &std::path::Path) -> Result<PathBuf, String> {
+    let dir = base.join(id);
     let _ = std::fs::remove_dir_all(&dir);
     let cab = crate::catalog::download(agent, id, &dir)?;
     let out = dir.join("pilote");
@@ -229,14 +230,15 @@ fn run(rx: Receiver<Cmd>, tx: Sender<Msg>) {
                         Err(e) => format!("ERREUR  WU         {title} : {e}"),
                     });
                 }
+                let tmp = std::env::temp_dir().join("mesdrivers");
                 for (id, title) in &catalog {
                     k += 1;
                     say(format!("{k}/{n} : {title} (Catalogue : téléchargement)…"));
-                    let r = fetch_catalog_package(&agent, id).and_then(|dir| {
+                    let r = fetch_catalog_package(&agent, id, &tmp).and_then(|dir| {
                         say(format!("{k}/{n} : {title} (installation)…"));
                         crate::pnputil::add_dir(&dir)
                     });
-                    let _ = std::fs::remove_dir_all(std::env::temp_dir().join("mesdrivers").join(id));
+                    let _ = std::fs::remove_dir_all(tmp.join(id));
                     journal(match r {
                         Ok(r) => {
                             ok += 1;
