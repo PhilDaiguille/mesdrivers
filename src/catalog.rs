@@ -45,6 +45,12 @@ pub fn worth_checking(hwid: &str, provider: &str) -> bool {
     ["PCI\\", "USB\\", "HDAUDIO\\"].iter().any(|b| h.starts_with(b)) && !provider.eq_ignore_ascii_case("Microsoft")
 }
 
+/// Périphérique sans pilote : on cherche aussi les bus ACPI (composants Intel/AMD de la carte mère).
+pub fn worth_checking_missing(hwid: &str) -> bool {
+    let h = hwid.to_ascii_uppercase();
+    ["PCI\\", "USB\\", "HDAUDIO\\", "ACPI\\"].iter().any(|b| h.starts_with(b))
+}
+
 #[derive(Debug, PartialEq)]
 pub struct Entry {
     pub id: String,
@@ -168,11 +174,20 @@ pub fn download_info(agent: &ureq::Agent, id: &str) -> Result<(String, String), 
 }
 
 /// Télécharge le .cab dans `dir` et vérifie son SHA-1 contre l'empreinte du Catalogue.
-pub fn download(agent: &ureq::Agent, url: &str, digest: &str, dir: &std::path::Path) -> Result<std::path::PathBuf, String> {
+/// `progress(reçus, total)` est appelé pendant le téléchargement.
+pub fn download(
+    agent: &ureq::Agent,
+    url: &str,
+    digest: &str,
+    dir: &std::path::Path,
+    progress: &dyn Fn(u64, Option<u64>),
+) -> Result<std::path::PathBuf, String> {
     let name = url.rsplit('/').next().filter(|n| n.ends_with(".cab")).unwrap_or("pilote.cab");
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     let path = dir.join(name);
     let mut resp = agent.get(url).call().map_err(|e| format!("Téléchargement : {e}"))?;
+    let total = resp.headers().get("content-length").and_then(|v| v.to_str().ok()?.parse::<u64>().ok());
+    let mut got = 0u64;
     let mut reader = resp.body_mut().with_config().limit(4 << 30).reader();
     let mut file = std::fs::File::create(&path).map_err(|e| e.to_string())?;
     let mut sha = sha1_smol::Sha1::new();
@@ -183,6 +198,8 @@ pub fn download(agent: &ureq::Agent, url: &str, digest: &str, dir: &std::path::P
             break;
         }
         sha.update(&buf[..n]);
+        got += n as u64;
+        progress(got, total);
         std::io::Write::write_all(&mut file, &buf[..n]).map_err(|e| e.to_string())?;
     }
     if base64(&sha.digest().bytes()) != digest {
@@ -261,6 +278,9 @@ mod tests {
         assert!(worth_checking(r"PCI\VEN_8086", "Intel"));
         assert!(!worth_checking(r"PCI\VEN_8086", "Microsoft"));
         assert!(!worth_checking(r"ROOT\VOLMGR", "Intel"));
+        assert!(worth_checking_missing(r"ACPI\INT3472"));
+        assert!(!worth_checking_missing(r"SWD\MMDEVAPI"));
+        assert!(!worth_checking_missing(""));
     }
 
     /// Réseau réel : `cargo test -- --ignored`
@@ -271,7 +291,9 @@ mod tests {
         let Catalog::Found { id, .. } = check(&agent, r"PCI\VEN_8086&DEV_51F1") else { panic!("rien trouvé") };
         let dir = std::env::temp_dir().join("mesdrivers-test");
         let (url, digest) = download_info(&agent, &id).expect("info");
-        let cab = download(&agent, &url, &digest, &dir).expect("téléchargement");
+        let last = std::cell::Cell::new(0);
+        let cab = download(&agent, &url, &digest, &dir, &|got, _| last.set(got)).expect("téléchargement");
+        assert!(last.get() > 1_000_000);
         assert!(std::fs::metadata(&cab).unwrap().len() > 1_000_000);
         let _ = std::fs::remove_dir_all(dir);
     }

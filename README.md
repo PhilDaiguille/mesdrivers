@@ -3,13 +3,16 @@
 Outil de gestion des pilotes Windows dans le terminal (TUI). Il remplace « Mes Drivers » de TousLesDrivers, figé depuis 2016 :
 
 - **Résumé** du PC : Windows, CPU, RAM, carte mère, BIOS, cartes graphiques, disques.
-- **Matériel** : tous les pilotes installés, les périphériques en erreur en rouge.
+- **Matériel** : tous les pilotes installés, les périphériques en erreur en rouge. Pour ceux **sans pilote**, l'appli cherche aussi au Catalogue.
+- **Fiche périphérique** (`Entrée`) : HardwareID, versions présentes sur le PC, et **retour à une version précédente**.
 - **Mises à jour** depuis deux sources officielles et signées :
   - **Windows Update** ;
   - **Catalogue Microsoft Update**, souvent plus récent : .cab vérifié par SHA-1, contrôle de l'architecture, installation via `pnputil`.
-- **DriverStore** : repère les anciennes versions de pilotes qui prennent de la place (souvent plusieurs Go) et les supprime sans risque.
+- **DriverStore** : repère les anciennes versions de pilotes qui prennent de la place (souvent plusieurs Go) et les supprime sans risque. Après chaque mise à jour, l'appli propose de supprimer l'ancienne version.
 - **Sauvegarde / restauration** de tous les pilotes, idéal avant de réinstaller Windows.
 - **Mise à jour automatique** de MesDrivers depuis GitHub (exe vérifié par SHA-256).
+- **Démarrage instantané** : le dernier scan s'affiche tout de suite, puis il est rafraîchi en fond.
+- **Souris**, tri des colonnes, aide intégrée (`?`), progression en % des téléchargements.
 
 ## Installation (PowerShell)
 
@@ -31,13 +34,16 @@ Windows demande les droits administrateur au lancement (nécessaires pour instal
 
 | Touche | Action |
 |---|---|
-| `Tab` / `1`–`5` | changer d'onglet |
-| `↑↓` `PgUp/PgDn` | naviguer |
+| `?` | aide |
+| `Tab` / `1`–`5` / clic | changer d'onglet |
+| `↑↓` `PgUp/PgDn` / molette | naviguer |
+| `s` | changer le tri |
+| `Entrée` (Matériel) | fiche du périphérique, retour à une version précédente |
 | `/` | filtrer (Échap efface) |
-| `Espace` / `a` | cocher / tout cocher |
+| `Espace` / clic sur `[ ]` / `a` | cocher / tout cocher |
 | `i` | installer les mises à jour cochées |
 | `d` | supprimer les paquets DriverStore cochés |
-| `Entrée` | lancer une sauvegarde / restauration |
+| `Entrée` (Sauvegarde) | lancer une sauvegarde / restauration |
 | `m` | afficher/masquer les pilotes génériques Microsoft |
 | `o` | ouvrir le Catalogue Microsoft pour la ligne sélectionnée |
 | `r` | rescanner |

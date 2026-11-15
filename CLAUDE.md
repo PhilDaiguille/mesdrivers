@@ -25,6 +25,7 @@ Le code Windows (COM, WMI, SetupAPI, pnputil) ne peut **s'exécuter** que dans l
 - **Opérations qui modifient le système** (installation, restauration, suppression) : point de restauration avant (`worker::restore_point`, repli via `Msg::NeedForce`), une ligne dans `journal::log`, confirmation `o/N` dans l'UI. Jamais de `pnputil /force`.
 - **Catalogue Microsoft :** HTML non documenté (structure dans `docs/architecture.md`). Si le parsing change, ajouter un extrait réel en test dans `catalog.rs` (comme `ROW`). Le même paquet existe sous plusieurs ids : regrouper par (titre, version) et dédupliquer par empreinte SHA-1.
 - **Dépendances :** n'en ajouter que si c'est vraiment nécessaire. TLS = `native-tls` (schannel) volontairement : pas de `ring`, qui casse la vérification croisée depuis le Mac.
+- **Tester l'UI sans Windows :** placer un `cache.json` d'exemple dans `$TMPDIR/mesdrivers/` (structure : `cache::Cache`), puis piloter la TUI dans un pseudo-terminal avec `pyte` pour lire l'écran. Envoyer chaque séquence d'échappement d'un bloc : un `Échap` isolé quitte l'appli.
 - **Dates Intel 1968** : convention normale des INF chipset. Les afficher via `model::display_date`, ne pas les « corriger ».
 
 ## Release

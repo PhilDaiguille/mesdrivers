@@ -68,7 +68,7 @@ pub fn original_name(store_dir: &str) -> String {
     }
 }
 
-/// Dossier du paquet dans FileRepository (API SetupAPI).
+/// Chemin de l'INF du paquet dans FileRepository (API SetupAPI).
 #[cfg(windows)]
 fn store_location(oem_inf: &Path) -> Option<std::path::PathBuf> {
     use windows::Win32::Devices::DeviceAndDriverInstallation::SetupGetInfDriverStoreLocationW;
@@ -79,7 +79,19 @@ fn store_location(oem_inf: &Path) -> Option<std::path::PathBuf> {
         SetupGetInfDriverStoreLocationW(&HSTRING::from(oem_inf.as_os_str()), None, PCWSTR::null(), &mut buf, Some(&mut needed)).ok()?;
     }
     let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
-    std::path::PathBuf::from(String::from_utf16_lossy(&buf[..len])).parent().map(Path::to_path_buf)
+    Some(std::path::PathBuf::from(String::from_utf16_lossy(&buf[..len])))
+}
+
+/// Installe de force `inf` pour les périphériques `hwid`, même si la version est plus ancienne.
+/// Renvoie true si un redémarrage est nécessaire.
+#[cfg(windows)]
+pub fn force_install(hwid: &str, inf: &str) -> Result<bool, String> {
+    use windows::Win32::Devices::DeviceAndDriverInstallation::{INSTALLFLAG_FORCE, UpdateDriverForPlugAndPlayDevicesW};
+    use windows::core::{BOOL, HSTRING};
+    let mut reboot = BOOL(0);
+    unsafe { UpdateDriverForPlugAndPlayDevicesW(None, &HSTRING::from(hwid), &HSTRING::from(inf), INSTALLFLAG_FORCE, Some(&mut reboot)) }
+        .map_err(|e| e.message())?;
+    Ok(reboot.as_bool())
 }
 
 /// Inventaire du DriverStore. `in_use` = noms oemNN.inf utilisés par un périphérique présent (WMI InfName).
@@ -98,11 +110,13 @@ pub fn scan(in_use: &[String]) -> Vec<Package> {
         .map(|p| {
             let oem = p.file_name().unwrap_or_default().to_string_lossy().to_lowercase();
             let (provider, class, date, version) = version_info(&read_text(&p));
-            let dir = store_location(&p);
+            let inf = store_location(&p);
+            let dir = inf.as_deref().and_then(Path::parent);
             Package {
+                path: inf.as_deref().map(|i| i.display().to_string()).unwrap_or_default(),
                 in_use: in_use.iter().any(|u| u.eq_ignore_ascii_case(&oem)),
-                original: dir.as_ref().and_then(|d| d.file_name()).map_or_else(|| oem.clone(), |n| original_name(&n.to_string_lossy())),
-                size: dir.as_deref().map_or(0, crate::pnputil::dir_size),
+                original: dir.and_then(|d| d.file_name()).map_or_else(|| oem.clone(), |n| original_name(&n.to_string_lossy())),
+                size: dir.map_or(0, crate::pnputil::dir_size),
                 oem,
                 provider,
                 class,

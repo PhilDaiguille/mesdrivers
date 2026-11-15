@@ -12,6 +12,8 @@ pub enum Cmd {
     Restore { dir: PathBuf, skip_restore: bool },
     DeletePackages(Vec<String>),
     SelfUpdate(String),
+    /// Réinstalle de force une version présente dans le DriverStore (retour arrière).
+    Rollback { hwid: String, inf: String, label: String, skip_restore: bool },
 }
 
 pub enum Msg {
@@ -24,6 +26,8 @@ pub enum Msg {
     Store(Vec<Package>),
     NewVersion(String),
     Progress(String),
+    /// Avancement d'un téléchargement (0..1), `None` à la fin.
+    Gauge(Option<f64>),
     /// Le point de restauration a échoué : la commande à relancer (sans point) si l'utilisateur confirme.
     NeedForce(String, Cmd),
     Status(String),
@@ -45,13 +49,19 @@ pub fn spawn() -> (Sender<Cmd>, Receiver<Msg>) {
 }
 
 /// Lance la vérification Catalogue de chaque HardwareID utile sur 4 threads ; les réponses arrivent au fil de l'eau.
-pub fn check_catalog(devices: &mut [Device], tx: &Sender<Msg>) {
+pub fn check_catalog(devices: &mut [Device], broken: &mut [BrokenDevice], tx: &Sender<Msg>) {
     let mut hwids: Vec<String> = Vec::new();
-    for d in devices.iter_mut().filter(|d| crate::catalog::worth_checking(&d.hwid, &d.provider)) {
-        d.catalog = Catalog::Pending;
-        if !hwids.contains(&d.hwid) {
-            hwids.push(d.hwid.clone());
+    let mut add = |hwid: &String, state: &mut Catalog| {
+        *state = Catalog::Pending;
+        if !hwids.contains(hwid) {
+            hwids.push(hwid.clone());
         }
+    };
+    for d in devices.iter_mut().filter(|d| crate::catalog::worth_checking(&d.hwid, &d.provider)) {
+        add(&d.hwid, &mut d.catalog);
+    }
+    for b in broken.iter_mut().filter(|b| crate::catalog::worth_checking_missing(&b.hwid)) {
+        add(&b.hwid, &mut b.catalog);
     }
     let agent = crate::catalog::agent();
     for t in 0..4 {
@@ -71,16 +81,41 @@ pub fn check_catalog(devices: &mut [Device], tx: &Sender<Msg>) {
 /// Télécharge (SHA-1 vérifié) et extrait un paquet du Catalogue dans `base\<id>` ;
 /// refuse s'il ne vise pas l'architecture du PC.
 /// `info` = (URL, empreinte SHA-1) lue par `catalog::download_info`.
-pub fn fetch_catalog_package(agent: &ureq::Agent, id: &str, info: &(String, String), base: &std::path::Path) -> Result<PathBuf, String> {
+pub fn fetch_catalog_package(
+    agent: &ureq::Agent,
+    id: &str,
+    info: &(String, String),
+    base: &std::path::Path,
+    progress: &dyn Fn(u64, Option<u64>),
+) -> Result<PathBuf, String> {
     let dir = base.join(id);
     let _ = std::fs::remove_dir_all(&dir);
-    let cab = crate::catalog::download(agent, &info.0, &info.1, &dir)?;
+    let cab = crate::catalog::download(agent, &info.0, &info.1, &dir, progress)?;
     let out = dir.join("pilote");
     crate::pnputil::expand_cab(&cab, &out)?;
     if !crate::pnputil::has_inf_for_this_arch(&out) {
         return Err("ce paquet ne contient pas de pilote pour l'architecture de ce PC".into());
     }
     Ok(out)
+}
+
+/// Dossier des téléchargements du Catalogue, vidé après chaque installation et au démarrage.
+pub fn temp_dir() -> PathBuf {
+    std::env::temp_dir().join("mesdrivers-telechargements")
+}
+
+/// Rappel de progression qui envoie le pourcentage à l'UI (au plus une fois par point de %).
+fn gauge(tx: &Sender<Msg>) -> impl Fn(u64, Option<u64>) + '_ {
+    let last = std::cell::Cell::new(u64::MAX);
+    move |got, total| {
+        if let Some(t) = total.filter(|t| *t > 0) {
+            let pct = got * 100 / t;
+            if pct != last.get() {
+                last.set(pct);
+                let _ = tx.send(Msg::Gauge(Some(got as f64 / t as f64)));
+            }
+        }
+    }
 }
 
 fn backup_report(dir: &std::path::Path) -> String {
@@ -149,8 +184,8 @@ fn inventory_job(tx: Sender<Msg>, with_summary: bool) {
         }
     };
     match crate::inventory::scan(&con) {
-        Ok((mut d, b)) => {
-            check_catalog(&mut d, &tx);
+        Ok((mut d, mut b)) => {
+            check_catalog(&mut d, &mut b, &tx);
             let in_use: Vec<String> = d.iter().map(|x| x.inf.clone()).collect();
             let _ = tx.send(Msg::Inventory(d, b));
             if with_summary {
@@ -231,7 +266,7 @@ fn run(rx: Receiver<Cmd>, tx: Sender<Msg>) {
                         Err(e) => format!("ERREUR  WU         {title} : {e}"),
                     });
                 }
-                let tmp = std::env::temp_dir().join("mesdrivers");
+                let tmp = temp_dir();
                 // Le même .cab peut être publié sous plusieurs ids (un par matériel) : on ne l'installe qu'une fois.
                 let mut done_digests = std::collections::HashSet::new();
                 for (id, title) in &catalog {
@@ -248,7 +283,8 @@ fn run(rx: Receiver<Cmd>, tx: Sender<Msg>) {
                         continue;
                     }
                     say(format!("{k}/{n} : {title} (Catalogue : téléchargement)…"));
-                    let r = fetch_catalog_package(&agent, id, &info, &tmp).and_then(|dir| {
+                    let r = fetch_catalog_package(&agent, id, &info, &tmp, &gauge(&tx)).and_then(|dir| {
+                        let _ = tx.send(Msg::Gauge(None));
                         say(format!("{k}/{n} : {title} (installation)…"));
                         crate::pnputil::add_dir(&dir)
                     });
@@ -319,6 +355,25 @@ fn run(rx: Receiver<Cmd>, tx: Sender<Msg>) {
                 let _ = tx.send(Msg::Status(s));
                 let inv_tx = tx.clone();
                 let _ = std::thread::spawn(move || inventory_job(inv_tx, false)).join();
+            }
+            Cmd::Rollback { hwid, inf, label, skip_restore } => {
+                if !skip_restore {
+                    say("Création du point de restauration…".into());
+                    if let Err(e) = restore_point() {
+                        let _ = tx.send(Msg::NeedForce(e, Cmd::Rollback { hwid, inf, label, skip_restore: true }));
+                        let _ = tx.send(Msg::Done);
+                        continue;
+                    }
+                }
+                say(format!("Retour à {label}…"));
+                let s = match crate::store::force_install(&hwid, &inf) {
+                    Ok(true) => format!("Revenu à {label}. Redémarrage nécessaire."),
+                    Ok(false) => format!("Revenu à {label}."),
+                    Err(e) => format!("Retour arrière impossible : {e}"),
+                };
+                journal(format!("RETOUR  {hwid} -> {inf} : {s}"));
+                let _ = tx.send(Msg::Status(s));
+                scan(&mut wu, false);
             }
             Cmd::SelfUpdate(tag) => {
                 say(format!("Téléchargement de {tag}…"));

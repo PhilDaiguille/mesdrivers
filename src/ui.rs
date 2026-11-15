@@ -1,11 +1,11 @@
 //! Rendu de l'interface (aucune logique métier ici).
 use crate::model::{Catalog, Source, cmp_version, current_version, display_date, error_label, human_size};
-use crate::{App, Input, MAJ, MATERIEL, RESUME, SAUVEGARDE, STORE};
+use crate::{App, Input, MAJ, MATERIEL, RESUME, SAUVEGARDE, SORTS, STORE};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Style, Stylize};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Cell, Paragraph, Row, Table, Tabs, Wrap};
+use ratatui::widgets::{Block, Cell, Clear, LineGauge, Paragraph, Row, Table, Tabs, Wrap};
 
 pub fn draw(f: &mut Frame, app: &mut App) {
     let [top, body, details, bottom, help] = Layout::vertical([
@@ -26,6 +26,18 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         format!(" 4 DriverStore ({}) ", human_size(reclaim)),
         " 5 Sauvegarde ".to_string(),
     ];
+    // Positions des onglets pour la souris (Tabs met 1 espace de marge + séparateur « │ » entre chaque).
+    let mut x = top.x;
+    app.tab_spans = titles
+        .iter()
+        .map(|t| {
+            let w = t.chars().count() as u16 + 2;
+            let span = (x, x + w);
+            x += w + 1;
+            span
+        })
+        .collect();
+    app.body = body;
     f.render_widget(Tabs::new(titles).select(app.tab).highlight_style(Style::new().bold().reversed()).divider("│"), top);
 
     let mut title = match app.tab {
@@ -40,6 +52,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     }
     if app.tab == MATERIEL && app.hidden_ms() > 0 {
         title += &format!("· {} pilotes Microsoft masqués (m) ", app.hidden_ms());
+    }
+    if let Some(sort) = SORTS[app.tab].get(app.sort[app.tab]).filter(|_| app.sort[app.tab] > 0) {
+        title += &format!("· tri : {sort} ");
     }
     let block = Block::bordered().title(title);
     let hl = Style::new().reversed();
@@ -76,8 +91,17 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             let table_rows = rows.iter().map(|&i| match i.checked_sub(nb) {
                 None => {
                     let b = &app.broken[i];
-                    Row::new([b.name.clone(), String::new(), format!("Code {} : {}", b.code, error_label(b.code)), String::new(), String::new()])
-                        .style(Style::new().fg(Color::Red))
+                    let cat = match &b.catalog {
+                        Catalog::Found { version, .. } => Cell::from(format!("{version} dispo")).yellow(),
+                        other => catalog_cell(other, ""),
+                    };
+                    Row::new([
+                        Cell::from(b.name.clone()).red(),
+                        Cell::from(error_label(b.code)).red(),
+                        Cell::from(format!("code {}", b.code)).red(),
+                        Cell::from(""),
+                        cat,
+                    ])
                 }
                 Some(j) => {
                     let d = &app.devices[j];
@@ -100,7 +124,8 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         MAJ => {
             let table_rows = rows.iter().map(|&i| {
                 let u = &updates[i];
-                let cur = current_version(&app.devices, &u.hwid).unwrap_or("?");
+                let missing = !u.devices.is_empty() && u.devices.iter().all(|d| d.ends_with("(sans pilote)"));
+                let cur = if missing { "aucune" } else { current_version(&app.devices, &u.hwid).unwrap_or("?") };
                 let src = match u.source {
                     Source::Wu(_) => Cell::from("WU"),
                     Source::Catalog(_) => Cell::from("Catalogue").yellow(),
@@ -180,23 +205,137 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     let spin = if app.busy { ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"][app.tick % 10] } else { "•" };
     let status = if let Some((q, _)) = &app.confirm {
         Line::from(format!(" {q} (o/N)")).yellow().bold()
+    } else if let Some(r) = app.gauge {
+        let g = LineGauge::default().ratio(r.clamp(0.0, 1.0)).label(format!(" {spin} {} {:>3.0} %", app.status, r * 100.0)).filled_style(Style::new().cyan());
+        f.render_widget(g, bottom);
+        Line::from("")
     } else if let Some(Input::Path(_)) = app.input {
         Line::from(format!(" Dossier : {}▏", app.path)).cyan()
     } else {
         Line::from(format!(" {spin} {}", app.status))
     };
-    f.render_widget(Paragraph::new(status), bottom);
+    if app.gauge.is_none() || app.confirm.is_some() {
+        f.render_widget(Paragraph::new(status), bottom);
+    }
 
     let keys = match (&app.input, app.tab) {
         (Some(Input::Filter), _) => " Tapez pour filtrer · Entrée valider · Échap effacer",
         (Some(Input::Path(_)), _) => " Modifiez le chemin · Entrée valider · Échap annuler",
-        (None, RESUME) => " Tab/1-5 onglets · r rescanner · U mettre à jour MesDrivers · q quitter",
-        (None, MATERIEL) => " ↑↓ naviguer · / filtrer · m pilotes Microsoft · o Catalogue · r rescanner · q quitter",
-        (None, MAJ) => " Espace cocher · a tout · i installer · / filtrer · o Catalogue · q quitter",
-        (None, STORE) => " Espace cocher · a obsolètes · d supprimer · / filtrer · q quitter",
-        (None, _) => " ↑↓ choisir · Entrée lancer · q quitter",
+        (None, RESUME) => " Tab/1-5 onglets · r rescanner · U mettre à jour MesDrivers · ? aide · q quitter",
+        (None, MATERIEL) => " Entrée fiche · / filtrer · s trier · m pilotes Microsoft · o Catalogue · ? aide · q quitter",
+        (None, MAJ) => " Espace cocher · a tout · i installer · / filtrer · s trier · o Catalogue · ? aide · q quitter",
+        (None, STORE) => " Espace cocher · a obsolètes · d supprimer · / filtrer · s trier · ? aide · q quitter",
+        (None, _) => " ↑↓ choisir · Entrée lancer · ? aide · q quitter",
     };
     f.render_widget(Paragraph::new(keys).dark_gray(), help);
+
+    if app.sheet.is_some() {
+        draw_sheet(f, app);
+    }
+    if app.help {
+        draw_help(f);
+    }
+    if let Some((q, _)) = &app.confirm {
+        let area = centered(f.area(), 70, 7);
+        f.render_widget(Clear, area);
+        let text = vec![Line::from(""), Line::from(q.clone()).bold(), Line::from(""), Line::from("o = oui    N / Échap = non").dark_gray()];
+        let block = Block::bordered().title(" Confirmation ").border_style(Style::new().yellow());
+        f.render_widget(Paragraph::new(text).block(block).wrap(Wrap { trim: true }).centered(), area);
+    }
+}
+
+/// Rectangle centré de `w` % de large et `h` lignes de haut.
+fn centered(area: Rect, w: u16, h: u16) -> Rect {
+    let width = (area.width * w / 100).max(30).min(area.width);
+    let height = h.min(area.height);
+    Rect { x: area.x + (area.width - width) / 2, y: area.y + (area.height - height) / 2, width, height }
+}
+
+fn draw_help(f: &mut Frame) {
+    let keys = [
+        ("Tab / 1-5 / clic", "changer d'onglet"),
+        ("↑↓ PgUp PgDn molette", "naviguer"),
+        ("/", "filtrer (Échap efface)"),
+        ("s", "changer le tri"),
+        ("Espace / clic sur [ ]", "cocher"),
+        ("a", "tout cocher (Mises à jour) / les obsolètes (DriverStore)"),
+        ("i", "installer les mises à jour cochées"),
+        ("d", "supprimer les paquets DriverStore cochés"),
+        ("Entrée", "fiche du périphérique (Matériel) / lancer (Sauvegarde)"),
+        ("m", "afficher/masquer les pilotes Microsoft"),
+        ("o", "ouvrir le Catalogue Microsoft du périphérique"),
+        ("r", "rescanner"),
+        ("U", "mettre à jour MesDrivers"),
+        ("q", "quitter"),
+    ];
+    let lines: Vec<Line> = keys.iter().map(|(k, v)| Line::from(vec![Span::from(format!(" {k:<24}")).cyan(), Span::from(*v)])).collect();
+    let area = centered(f.area(), 70, lines.len() as u16 + 4);
+    f.render_widget(Clear, area);
+    let block = Block::bordered().title(" Aide · une touche pour fermer ");
+    f.render_widget(Paragraph::new(lines).block(block), area);
+}
+
+/// Fiche du périphérique : infos complètes + versions du même pilote dans le DriverStore (retour arrière).
+fn draw_sheet(f: &mut Frame, app: &App) {
+    let area = centered(f.area(), 85, 22);
+    f.render_widget(Clear, area);
+    let Some(i) = app.selected() else { return };
+    let label = |l: &'static str| Span::from(format!("{l:<14}")).dark_gray();
+    let mut lines: Vec<Line> = Vec::new();
+    match i.checked_sub(app.broken.len()) {
+        None => {
+            let b = &app.broken[i];
+            lines.push(Line::from(b.name.clone()).bold().red());
+            lines.push(Line::from(vec![label("Erreur"), Span::from(format!("code {} : {}", b.code, error_label(b.code)))]));
+            lines.push(Line::from(vec![label("HardwareID"), Span::from(b.hwid.clone())]));
+            lines.push(Line::from(vec![label("Catalogue"), Span::from(format!("{:?}", b.catalog))]));
+            lines.push(Line::from(""));
+            lines.push(Line::from("Si un pilote est trouvé, il apparaît dans l'onglet 3 Mises à jour.").dark_gray());
+        }
+        Some(j) => {
+            let d = &app.devices[j];
+            lines.push(Line::from(d.name.clone()).bold());
+            lines.push(Line::from(vec![label("Fabricant"), Span::from(d.provider.clone())]));
+            lines.push(Line::from(vec![label("Version"), Span::from(format!("{} ({})", d.version, display_date(&d.date)))]));
+            lines.push(Line::from(vec![label("Paquet"), Span::from(d.inf.clone())]));
+            lines.push(Line::from(vec![label("HardwareID"), Span::from(d.hwid.clone())]));
+            lines.push(Line::from(vec![label("Catalogue"), catalog_text(&d.catalog)]));
+            lines.push(Line::from(""));
+            let versions = app.sheet_versions();
+            if versions.is_empty() {
+                lines.push(Line::from("Aucune autre version de ce pilote dans le DriverStore (pilote Windows ou unique).").dark_gray());
+            } else {
+                lines.push(Line::from("Versions présentes sur ce PC (Entrée = revenir à cette version) :").cyan());
+                for (k, p) in versions.iter().enumerate() {
+                    let state = if p.in_use { "en service" } else if p.obsolete { "ancienne" } else { "inutilisée" };
+                    let mut l = Line::from(format!(
+                        "  {} {:<16} {:<10} {:<10} {:>9}  {state}",
+                        if Some(k) == app.sheet { ">" } else { " " },
+                        p.version,
+                        display_date(&p.date),
+                        p.oem,
+                        human_size(p.size)
+                    ));
+                    if Some(k) == app.sheet {
+                        l = l.reversed();
+                    }
+                    lines.push(l);
+                }
+            }
+        }
+    }
+    let block = Block::bordered().title(" Fiche · ↑↓ version · Entrée revenir · o Catalogue · Échap fermer ");
+    f.render_widget(Paragraph::new(lines).block(block), area);
+}
+
+fn catalog_text(c: &Catalog) -> Span<'static> {
+    match c {
+        Catalog::Skipped => Span::from("non vérifié (pilote Microsoft ou bus ignoré)").dark_gray(),
+        Catalog::Pending => Span::from("vérification en cours…").dark_gray(),
+        Catalog::NotFound => Span::from("aucun pilote Windows 10/11 publié").dark_gray(),
+        Catalog::Error(e) => Span::from(format!("erreur : {e}")).red(),
+        Catalog::Found { version, date, title, .. } => Span::from(format!("{version} ({}) · {title}", display_date(date))),
+    }
 }
 
 fn draw_backup(f: &mut Frame, app: &mut App, area: Rect, block: Block) {
@@ -266,10 +405,14 @@ fn detail_lines(app: &App, updates: &[crate::model::Update]) -> Vec<Line<'static
             let Some(i) = app.selected() else { return none() };
             let Some(j) = i.checked_sub(app.broken.len()) else {
                 let b = &app.broken[i];
+                let hint = match &b.catalog {
+                    Catalog::Found { .. } => Line::from("Pilote trouvé au Catalogue : il est proposé dans l'onglet 3 Mises à jour.").yellow(),
+                    _ => Line::from("Aucun pilote trouvé automatiquement : Entrée pour la fiche, o pour chercher au Catalogue.").dark_gray(),
+                };
                 return vec![
-                    Line::from(b.name.clone()).bold().red(),
-                    Line::from(format!("Code {} : {}", b.code, error_label(b.code))),
-                    Line::from("Cherchez un pilote dans l'onglet Mises à jour, ou le Gestionnaire de périphériques.").dark_gray(),
+                    Line::from(vec![Span::from(b.name.clone()).bold().red(), Span::from(format!("   code {} : {}", b.code, error_label(b.code)))]),
+                    line("HardwareID  ", b.hwid.clone()),
+                    hint,
                 ];
             };
             let d = &app.devices[j];

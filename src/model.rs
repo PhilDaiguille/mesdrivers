@@ -1,6 +1,7 @@
 //! Données affichées et petites conversions pures (compilé et testé sur toutes les plateformes).
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Device {
     pub name: String,
     pub provider: String,
@@ -13,7 +14,7 @@ pub struct Device {
 }
 
 /// Résultat de la vérification dans le Catalogue Microsoft Update.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub enum Catalog {
     /// Pas vérifié (Microsoft, bus ignoré) ou pas encore de réponse.
     #[default]
@@ -24,10 +25,13 @@ pub enum Catalog {
     Error(String),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct BrokenDevice {
     pub name: String,
     pub code: u32,
+    /// HardwareID le plus précis (vide si Windows n'en donne pas).
+    pub hwid: String,
+    pub catalog: Catalog,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -62,9 +66,11 @@ impl Update {
 }
 
 /// Paquet de pilote tiers présent dans le DriverStore (oemNN.inf).
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Package {
     pub oem: String,
+    /// Chemin complet de l'INF dans FileRepository (pour un retour arrière).
+    pub path: String,
     pub original: String,
     pub provider: String,
     pub class: String,
@@ -77,9 +83,17 @@ pub struct Package {
 
 /// Mises à jour Catalogue plus récentes que l'installé, regroupées par (titre, version) :
 /// 6 contrôleurs I2C qui partagent le même pilote donnent une seule ligne.
-pub fn catalog_updates(devices: &[Device]) -> Vec<Update> {
+pub fn catalog_updates(devices: &[Device], broken: &[BrokenDevice]) -> Vec<Update> {
+    // Un périphérique sans pilote = version installée vide : toute version trouvée est « plus récente ».
+    let missing = broken.iter().map(|b| Device {
+        name: format!("{} (sans pilote)", b.name),
+        hwid: b.hwid.clone(),
+        catalog: b.catalog.clone(),
+        ..Default::default()
+    });
+    let all: Vec<Device> = devices.iter().cloned().chain(missing).collect();
     let mut out: Vec<Update> = Vec::new();
-    for d in devices {
+    for d in &all {
         let Catalog::Found { id, version, date, title } = &d.catalog else { continue };
         if !cmp_version(version, &d.version).is_gt() {
             continue;
@@ -105,6 +119,11 @@ pub fn catalog_updates(devices: &[Device]) -> Vec<Update> {
         }
     }
     out
+}
+
+/// Le Catalogue a une version plus récente que celle installée.
+pub fn has_newer(d: &Device) -> bool {
+    matches!(&d.catalog, Catalog::Found { version, .. } if cmp_version(version, &d.version).is_gt())
 }
 
 /// Les INF chipset Intel sont datés 1968 exprès (pour ne jamais passer devant un vrai pilote).
@@ -281,7 +300,15 @@ mod tests {
             dev("PEG10", "c", "INTEL System Driver Update (10.1.45.10)", "10.1.45.9", "10.1.45.10"),
             dev("SMBus", "d", "déjà à jour", "10.1.46.5", "10.1.46.5"),
         ];
-        let u = catalog_updates(&devs);
+        let broken = [BrokenDevice {
+            name: "Inconnu".into(),
+            code: 28,
+            hwid: r"ACPI\INT3472".into(),
+            catalog: Catalog::Found { id: "e".into(), version: "1.0".into(), date: "2025-01-01".into(), title: "Intel Camera".into() },
+        }];
+        assert_eq!(catalog_updates(&devs, &broken).len(), 3);
+        assert_eq!(catalog_updates(&devs, &broken)[2].devices, ["Inconnu (sans pilote)"]);
+        let u = catalog_updates(&devs, &[]);
         assert_eq!(u.len(), 2);
         assert_eq!(u[0].source, Source::Catalog(vec!["a".into(), "b".into()]));
         assert_eq!(u[0].devices.len(), 3);

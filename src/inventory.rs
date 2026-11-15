@@ -21,6 +21,8 @@ struct PnpEntity {
     name: Option<String>,
     device_id: Option<String>,
     config_manager_error_code: Option<u32>,
+    #[serde(rename = "HardwareID")]
+    hardware_id: Option<Vec<String>>,
 }
 
 pub fn scan(con: &WMIConnection) -> Result<(Vec<Device>, Vec<BrokenDevice>), wmi::WMIError> {
@@ -42,11 +44,13 @@ pub fn scan(con: &WMIConnection) -> Result<(Vec<Device>, Vec<BrokenDevice>), wmi
     devices.sort_by_key(|d| d.name.to_lowercase());
 
     let broken = con
-        .raw_query::<PnpEntity>("SELECT Name, DeviceID, ConfigManagerErrorCode FROM Win32_PnPEntity WHERE ConfigManagerErrorCode <> 0")?
+        .raw_query::<PnpEntity>("SELECT Name, DeviceID, ConfigManagerErrorCode, HardwareID FROM Win32_PnPEntity WHERE ConfigManagerErrorCode <> 0")?
         .into_iter()
         .map(|e| BrokenDevice {
             name: e.name.or(e.device_id).unwrap_or_else(|| "Périphérique inconnu".into()),
             code: e.config_manager_error_code.unwrap_or(0),
+            hwid: e.hardware_id.and_then(|h| h.into_iter().next()).unwrap_or_default(),
+            catalog: Default::default(),
         })
         .collect();
 

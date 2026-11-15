@@ -18,6 +18,7 @@ MesDrivers est un exécutable Rust unique et portable (~1,8 Mo), sans installati
 | `pnputil.rs` | Appels à `pnputil` et `expand` (codes retour, pas le texte qui est traduit) |
 | `selfupdate.rs` | Mise à jour de l'exe depuis les releases GitHub (SHA-256) |
 | `journal.rs` | Journal `%LOCALAPPDATA%\mesdrivers\journal.txt` |
+| `cache.rs` | Dernier scan (`%LOCALAPPDATA%\mesdrivers\cache.json`), affiché au lancement puis remplacé par le scan frais. Écriture atomique |
 | `cli.rs` | Mode sans interface : `--scan`, `--catalog`, `--catalog-get`, `--backup`, `--restore` |
 
 ## Threads
@@ -52,6 +53,14 @@ flowchart LR
 6. **Regroupement :** Intel publie le même paquet sous plusieurs ids (un par matériel visé). Les mises à jour sont donc regroupées par (titre, version), et un .cab déjà installé dans le lot (même empreinte) est sauté.
 
 Seuls les périphériques `PCI\`, `USB\` et `HDAUDIO\` dont le fournisseur n'est pas Microsoft sont vérifiés.
+
+## Fonctions ajoutées en v0.4
+
+- **Sans pilote :** `Win32_PnPEntity.HardwareID` des périphériques en erreur, cherché au Catalogue (bus `PCI\`, `USB\`, `HDAUDIO\` et aussi `ACPI\`). La version installée est vide, donc toute version trouvée est proposée.
+- **Retour arrière :** la fiche liste les paquets du DriverStore ayant le même INF d'origine que le pilote du périphérique. `Cmd::Rollback` appelle `UpdateDriverForPlugAndPlayDevicesW(hwid, inf, INSTALLFLAG_FORCE)` (newdev), précédé du point de restauration.
+- **Après installation :** au `Msg::Done` d'un `Install`/`Restore`, si le DriverStore contient des paquets obsolètes, l'UI propose `Cmd::DeletePackages`.
+- **Téléchargements :** dans `%TEMP%\mesdrivers-telechargements`, effacés après chaque installation et au lancement. Ce dossier est volontairement distinct du dossier des données.
+- **Cache :** la liste Windows Update n'est **jamais** mise en cache. Elle dépend des objets COM du worker, et l'installation reste bloquée tant que le scan frais n'est pas fini.
 
 ## Sécurité
 

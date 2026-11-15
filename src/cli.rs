@@ -38,7 +38,7 @@ pub fn catalog_get(hwid: &str, dir: &Path) -> i32 {
             return 1;
         }
     };
-    match crate::worker::fetch_catalog_package(&agent, &id, &info, dir) {
+    match crate::worker::fetch_catalog_package(&agent, &id, &info, dir, &|_, _| {}) {
         Ok(target) => {
             let files = crate::pnputil::files(&target);
             let infs = files.iter().filter(|f| f.extension().is_some_and(|e| e.eq_ignore_ascii_case("inf"))).count();
@@ -103,7 +103,7 @@ pub fn scan() -> i32 {
     let wu_t = wu_t.elapsed();
     let (inv, inv_t) = inv.join().unwrap_or((Err("thread WMI planté".into()), Default::default()));
 
-    let mut devices = match inv {
+    let (mut devices, mut broken) = match inv {
         Ok(((d, b), summary)) => {
             println!("== Résumé");
             for (k, v) in &summary {
@@ -111,17 +111,17 @@ pub fn scan() -> i32 {
             }
             println!("== Inventaire WMI : {} pilotes, {} en erreur ({inv_t:.1?})", d.len(), b.len());
             for x in &b {
-                println!("  ! {} (code {} : {})", x.name, x.code, crate::model::error_label(x.code));
+                println!("  ! {} (code {} : {}) {}", x.name, x.code, crate::model::error_label(x.code), x.hwid);
             }
             for x in d.iter().filter(|x| !x.provider.eq_ignore_ascii_case("Microsoft")) {
                 println!("  {} | {} | {} | {} | {}", x.name, x.provider, x.version, x.date, x.inf);
             }
-            d
+            (d, b)
         }
         Err(e) => {
             println!("== Inventaire WMI : ERREUR {e}");
             code = 1;
-            Vec::new()
+            (Vec::new(), Vec::new())
         }
     };
     match wu {
@@ -155,7 +155,7 @@ pub fn scan() -> i32 {
 
     let cat_t = Instant::now();
     let (tx, rx) = std::sync::mpsc::channel();
-    crate::worker::check_catalog(&mut devices, &tx);
+    crate::worker::check_catalog(&mut devices, &mut broken, &tx);
     drop(tx);
     let results: Vec<(String, Catalog)> =
         rx.into_iter().filter_map(|m| if let crate::worker::Msg::Catalog(h, c) = m { Some((h, c)) } else { None }).collect();
