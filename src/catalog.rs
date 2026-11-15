@@ -76,14 +76,20 @@ pub fn parse(html: &str) -> Vec<Entry> {
             let row = &html[i + m.len()..];
             let row = &row[..row.find('"')?];
             let (guid, n) = row.rsplit_once("_R")?;
-            let e = Entry {
-                title: cell(&format!("{guid}_C1_R{n}")),
-                date: us_date(&cell(&format!("{guid}_C4_R{n}"))),
-                version: cell(&format!("{guid}_C5_R{n}")),
-            };
+            let title = cell(&format!("{guid}_C1_R{n}"));
+            let mut version = cell(&format!("{guid}_C5_R{n}"));
+            // Les anciennes entrées ont "n/a" : la version est alors en fin de titre ("… - 2.0.19824.0").
+            if !looks_like_version(&version) {
+                version = title.rsplit(" - ").next().filter(|v| looks_like_version(v)).unwrap_or_default().to_string();
+            }
+            let e = Entry { title, date: us_date(&cell(&format!("{guid}_C4_R{n}"))), version };
             (!e.version.is_empty()).then_some(e)
         })
         .collect()
+}
+
+fn looks_like_version(s: &str) -> bool {
+    s.contains('.') && s.split('.').all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
 }
 
 /// "4/12/2026" -> "2026-04-12"
@@ -141,6 +147,14 @@ mod tests {
         assert_eq!(rows[1].title, "Old & Co");
         assert_eq!(rows[1].date, "2024-12-01");
         assert!(parse("<html>aucun résultat</html>").is_empty());
+
+        // Ancienne entrée vue en vrai sur le runner GitHub : version "n/a", reprise depuis le titre.
+        let old = r#"<tr id="g_R0"><td id="g_C1_R0">Mellanox Technologies Ltd. - Net - 7/2/2018 12:00:00 AM - 2.0.19824.0</td>
+            <td id="g_C4_R0">7/1/2018</td><td id="g_C5_R0">n/a</td></tr>
+            <tr id="g_R1"><td id="g_C1_R1">Sans version</td><td id="g_C4_R1">7/1/2018</td><td id="g_C5_R1">n/a</td></tr>"#;
+        let rows = parse(old);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].version, "2.0.19824.0");
     }
 
     #[test]
