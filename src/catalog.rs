@@ -47,6 +47,8 @@ pub fn worth_checking(hwid: &str, provider: &str) -> bool {
 
 #[derive(Debug, PartialEq)]
 pub struct Entry {
+    pub id: String,
+    pub products: String,
     pub title: String,
     pub date: String,
     pub version: String,
@@ -82,7 +84,13 @@ pub fn parse(html: &str) -> Vec<Entry> {
             if !looks_like_version(&version) {
                 version = title.rsplit(" - ").next().filter(|v| looks_like_version(v)).unwrap_or_default().to_string();
             }
-            let e = Entry { title, date: us_date(&cell(&format!("{guid}_C4_R{n}"))), version };
+            let e = Entry {
+                id: guid.to_string(),
+                products: cell(&format!("{guid}_C2_R{n}")),
+                title,
+                date: us_date(&cell(&format!("{guid}_C4_R{n}"))),
+                version,
+            };
             (!e.version.is_empty()).then_some(e)
         })
         .collect()
@@ -100,20 +108,83 @@ fn us_date(s: &str) -> String {
     }
 }
 
+/// Plus haute version publiée pour Windows 10/11 (les pilotes Windows 10 tournent sur 11).
+/// L'architecture n'est pas dans le tableau : elle est contrôlée dans l'INF après téléchargement.
+pub fn best(entries: Vec<Entry>) -> Option<Entry> {
+    entries
+        .into_iter()
+        .filter(|e| e.products.contains("Windows 10") || e.products.contains("Windows 11"))
+        .max_by(|a, b| cmp_version(&a.version, &b.version))
+}
+
 /// Version la plus récente publiée pour ce matériel.
-// shortcut: ne filtre ni l'architecture (x64/ARM64) ni la version de Windows ; c'est une indication,
-// pas une proposition d'installation. Filtrer sur la colonne Produits si on installe depuis le Catalogue.
 pub fn check(agent: &ureq::Agent, hwid: &str) -> Catalog {
     for q in queries(hwid) {
         let html = match agent.get(&search_url(&q)).call().and_then(|mut r| r.body_mut().read_to_string()) {
             Ok(h) => h,
             Err(e) => return Catalog::Error(e.to_string()),
         };
-        if let Some(best) = parse(&html).into_iter().max_by(|a, b| cmp_version(&a.version, &b.version)) {
-            return Catalog::Found { version: best.version, date: best.date, title: best.title };
+        if let Some(best) = best(parse(&html)) {
+            return Catalog::Found { id: best.id, version: best.version, date: best.date, title: best.title };
         }
     }
     Catalog::NotFound
+}
+
+/// Lit l'URL du .cab et son empreinte SHA-1 (base64) dans la réponse de DownloadDialog.aspx.
+pub fn parse_download(js: &str) -> Option<(String, String)> {
+    let get = |key: &str| {
+        let at = js.find(&format!("files[0].{key} = '"))? + key.len() + 13;
+        Some(js[at..at + js[at..].find('\'')?].to_string())
+    };
+    Some((get("url")?, get("digest")?))
+}
+
+pub fn base64(bytes: &[u8]) -> String {
+    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for c in bytes.chunks(3) {
+        let n = (u32::from(c[0]) << 16) | (u32::from(*c.get(1).unwrap_or(&0)) << 8) | u32::from(*c.get(2).unwrap_or(&0));
+        for i in 0..4 {
+            out.push(if i <= c.len() { T[(n >> (18 - 6 * i) & 63) as usize] as char } else { '=' });
+        }
+    }
+    out
+}
+
+/// Télécharge le .cab d'une mise à jour du Catalogue dans `dir` et vérifie son SHA-1.
+pub fn download(agent: &ureq::Agent, id: &str, dir: &std::path::Path) -> Result<std::path::PathBuf, String> {
+    let ids = format!(r#"[{{"size":0,"languages":"","uidInfo":"{id}","updateID":"{id}"}}]"#);
+    let js = agent
+        .post("https://www.catalog.update.microsoft.com/DownloadDialog.aspx")
+        .send_form([("updateIDs", ids.as_str())])
+        .and_then(|mut r| r.body_mut().read_to_string())
+        .map_err(|e| format!("Catalogue : {e}"))?;
+    let (url, digest) = parse_download(&js).ok_or("Catalogue : lien de téléchargement introuvable")?;
+    if !url.starts_with("https://") {
+        return Err(format!("Catalogue : lien refusé (pas HTTPS) {url}"));
+    }
+
+    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    let path = dir.join(format!("{id}.cab"));
+    let mut resp = agent.get(&url).call().map_err(|e| format!("Téléchargement : {e}"))?;
+    let mut reader = resp.body_mut().with_config().limit(4 << 30).reader();
+    let mut file = std::fs::File::create(&path).map_err(|e| e.to_string())?;
+    let mut sha = sha1_smol::Sha1::new();
+    let mut buf = vec![0u8; 1 << 16];
+    loop {
+        let n = std::io::Read::read(&mut reader, &mut buf).map_err(|e| format!("Téléchargement : {e}"))?;
+        if n == 0 {
+            break;
+        }
+        sha.update(&buf[..n]);
+        std::io::Write::write_all(&mut file, &buf[..n]).map_err(|e| e.to_string())?;
+    }
+    if base64(&sha.digest().bytes()) != digest {
+        let _ = std::fs::remove_file(&path);
+        return Err("Fichier corrompu : l'empreinte SHA-1 ne correspond pas au Catalogue.".into());
+    }
+    Ok(path)
 }
 
 #[cfg(test)]
@@ -143,7 +214,12 @@ mod tests {
     fn parses_rows() {
         let rows = parse(ROW);
         assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0], Entry { title: "Intel net Driver Update (24.40.0.4)".into(), date: "2026-04-12".into(), version: "24.40.0.4".into() });
+        assert_eq!(rows[0].id, "91bf41cb-0052-454a-a3cb-13ff62a706a4");
+        assert_eq!(rows[0].title, "Intel net Driver Update (24.40.0.4)");
+        assert_eq!(rows[0].products, "Windows 10, Vibranium and later");
+        assert_eq!((rows[0].date.as_str(), rows[0].version.as_str()), ("2026-04-12", "24.40.0.4"));
+        // R1 n'a pas de produits Windows 10/11 : écartée, R0 reste la meilleure.
+        assert_eq!(best(parse(ROW)).map(|e| e.version), Some("24.40.0.4".into()));
         assert_eq!(rows[1].title, "Old & Co");
         assert_eq!(rows[1].date, "2024-12-01");
         assert!(parse("<html>aucun résultat</html>").is_empty());
@@ -158,6 +234,19 @@ mod tests {
     }
 
     #[test]
+    fn download_info() {
+        let js = "downloadInformation[0].files[0].url = 'https://catalog.s.download.windowsupdate.com/d/x.cab';\n\
+                  downloadInformation[0].files[0].digest = 'Knt//8a9N/UJPGoCYfmupFrEdfQ=';";
+        assert_eq!(
+            parse_download(js),
+            Some(("https://catalog.s.download.windowsupdate.com/d/x.cab".into(), "Knt//8a9N/UJPGoCYfmupFrEdfQ=".into()))
+        );
+        assert_eq!(parse_download("rien"), None);
+        assert_eq!(base64(&sha1_smol::Sha1::from("abc").digest().bytes()), "qZk+NkcGgWq6PiVxeFDCbJzQ2J0=");
+        assert_eq!(base64(b"ab"), "YWI=");
+    }
+
+    #[test]
     fn builds_queries() {
         assert_eq!(queries(r"PCI\VEN_8086&DEV_51F1&SUBSYS_00948086&REV_01"), [r"PCI\VEN_8086&DEV_51F1&SUBSYS_00948086", r"PCI\VEN_8086&DEV_51F1"]);
         assert_eq!(queries(r"USB\VID_046D&PID_C52B&REV_1211"), [r"USB\VID_046D&PID_C52B"]);
@@ -168,4 +257,17 @@ mod tests {
         assert!(!worth_checking(r"PCI\VEN_8086", "Microsoft"));
         assert!(!worth_checking(r"ROOT\VOLMGR", "Intel"));
     }
+
+    /// Réseau réel : `cargo test -- --ignored`
+    #[test]
+    #[ignore]
+    fn live_download_verifies_sha1() {
+        let agent = agent();
+        let Catalog::Found { id, .. } = check(&agent, r"PCI\VEN_8086&DEV_51F1") else { panic!("rien trouvé") };
+        let dir = std::env::temp_dir().join("mesdrivers-test");
+        let cab = download(&agent, &id, &dir).expect("téléchargement");
+        assert!(std::fs::metadata(&cab).unwrap().len() > 1_000_000);
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }
+

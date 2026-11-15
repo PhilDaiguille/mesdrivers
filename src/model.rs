@@ -7,6 +7,8 @@ pub struct Device {
     pub version: String,
     pub date: String,
     pub hwid: String,
+    /// oemNN.inf utilisé (lien avec le DriverStore).
+    pub inf: String,
     pub catalog: Catalog,
 }
 
@@ -18,7 +20,7 @@ pub enum Catalog {
     Skipped,
     Pending,
     NotFound,
-    Found { version: String, date: String, title: String },
+    Found { id: String, version: String, date: String, title: String },
     Error(String),
 }
 
@@ -28,12 +30,65 @@ pub struct BrokenDevice {
     pub code: u32,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum Source {
+    /// Index dans la dernière recherche Windows Update.
+    Wu(usize),
+    /// Id de mise à jour du Catalogue Microsoft.
+    Catalog(String),
+}
+
 #[derive(Debug, Clone)]
 pub struct Update {
+    pub source: Source,
     pub title: String,
     pub provider: String,
     pub hwid: String,
     pub date: String,
+    /// Connue pour le Catalogue, vide pour Windows Update (elle est dans le titre).
+    pub version: String,
+}
+
+impl Update {
+    /// Clé stable pour mémoriser les cases cochées pendant que la liste se remplit.
+    pub fn key(&self) -> String {
+        match &self.source {
+            Source::Wu(i) => format!("wu:{i}"),
+            Source::Catalog(id) => format!("cat:{id}"),
+        }
+    }
+}
+
+/// Paquet de pilote tiers présent dans le DriverStore (oemNN.inf).
+#[derive(Debug, Clone, Default)]
+pub struct Package {
+    pub oem: String,
+    pub original: String,
+    pub provider: String,
+    pub class: String,
+    pub version: String,
+    pub date: String,
+    pub size: u64,
+    pub in_use: bool,
+    pub obsolete: bool,
+}
+
+/// Obsolète = inutilisé ET une version plus récente du même INF d'origine est en service.
+/// Un paquet seul (ex. imprimante débranchée) n'est donc jamais proposé à la suppression.
+pub fn mark_obsolete(pkgs: &mut [Package]) {
+    let used: Vec<(String, String)> =
+        pkgs.iter().filter(|p| p.in_use).map(|p| (p.original.to_lowercase(), p.version.clone())).collect();
+    for p in pkgs.iter_mut() {
+        let orig = p.original.to_lowercase();
+        p.obsolete = !p.in_use && used.iter().any(|(o, v)| *o == orig && cmp_version(v, &p.version).is_gt());
+    }
+}
+
+/// 123456789 -> "117,7 Mo"
+pub fn human_size(bytes: u64) -> String {
+    let b = bytes as f64;
+    let (v, unit) = if b >= 1e9 { (b / 1073741824.0, "Go") } else if b >= 1e6 { (b / 1048576.0, "Mo") } else { (b / 1024.0, "Ko") };
+    format!("{v:.1} {unit}").replace('.', ",")
 }
 
 /// "20230115000000.000000-000" (CIM_DATETIME) -> "2023-01-15"
@@ -144,6 +199,28 @@ mod tests {
         assert_eq!(visible(rows.into_iter(), "", true), [0, 2]);
         assert_eq!(visible(rows.into_iter(), "AUDIO", true), [2]);
         assert_eq!(visible(rows.into_iter(), "vol", true), [] as [usize; 0]);
+    }
+
+    #[test]
+    fn obsolete_rule() {
+        let p = |oem: &str, orig: &str, v: &str, used: bool| Package {
+            oem: oem.into(),
+            original: orig.into(),
+            version: v.into(),
+            in_use: used,
+            ..Default::default()
+        };
+        let mut pkgs = vec![
+            p("oem1.inf", "nvlti.inf", "32.0.15.5590", true),
+            p("oem2.inf", "nvlti.inf", "31.0.15.3000", false), // ancienne NVIDIA -> obsolète
+            p("oem3.inf", "NVLTI.INF", "33.0.0.1", false),     // plus récente mais inutilisée -> garder
+            p("oem4.inf", "printer.inf", "1.0", false),        // seule, appareil débranché -> garder
+            p("oem5.inf", "netwtw.inf", "1.0", true),
+        ];
+        mark_obsolete(&mut pkgs);
+        assert_eq!(pkgs.iter().map(|p| p.obsolete).collect::<Vec<_>>(), [false, true, false, false, false]);
+        assert_eq!(human_size(1_500_000_000), "1,4 Go");
+        assert_eq!(human_size(2048), "2,0 Ko");
     }
 
     #[test]

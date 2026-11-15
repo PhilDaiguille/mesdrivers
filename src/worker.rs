@@ -1,22 +1,32 @@
-//! Thread de travail : tout le COM (WMI + Windows Update) et le réseau vivent hors de l'UI.
-use crate::model::{BrokenDevice, Catalog, Device, Update};
+//! Thread de travail : tout le COM (WMI + Windows Update), le réseau et les outils Windows vivent hors de l'UI.
+use crate::model::{BrokenDevice, Catalog, Device, Package, Update};
+use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender, channel};
 
+#[derive(Clone, Debug)]
 pub enum Cmd {
     Scan,
-    Install { picks: Vec<usize>, skip_restore: bool },
+    /// `catalog` = (id de mise à jour, titre).
+    Install { wu: Vec<usize>, catalog: Vec<(String, String)>, skip_restore: bool },
+    Backup(PathBuf),
+    Restore { dir: PathBuf, skip_restore: bool },
+    DeletePackages(Vec<String>),
+    SelfUpdate(String),
 }
 
 pub enum Msg {
+    Summary(Vec<(String, String)>),
     Inventory(Vec<Device>, Vec<BrokenDevice>),
+    /// Pilotes proposés par Windows Update.
     Updates(Vec<Update>),
     /// Résultat Catalogue pour un HardwareID (appliqué à tous les périphériques qui l'ont).
     Catalog(String, Catalog),
+    Store(Vec<Package>),
+    NewVersion(String),
     Progress(String),
-    /// Le point de restauration a échoué : l'utilisateur doit confirmer pour continuer.
-    NeedForce(String),
-    Installed(String),
-    Error(String),
+    /// Le point de restauration a échoué : la commande à relancer (sans point) si l'utilisateur confirme.
+    NeedForce(String, Cmd),
+    Status(String),
     /// Fin de la commande en cours.
     Done,
 }
@@ -24,6 +34,12 @@ pub enum Msg {
 pub fn spawn() -> (Sender<Cmd>, Receiver<Msg>) {
     let (cmd_tx, cmd_rx) = channel();
     let (msg_tx, msg_rx) = channel();
+    let up_tx = msg_tx.clone();
+    std::thread::spawn(move || {
+        if let Some(tag) = crate::selfupdate::newer_release(&crate::catalog::agent()) {
+            let _ = up_tx.send(Msg::NewVersion(tag));
+        }
+    });
     std::thread::spawn(move || run(cmd_rx, msg_tx));
     (cmd_tx, msg_rx)
 }
@@ -52,28 +68,58 @@ pub fn check_catalog(devices: &mut [Device], tx: &Sender<Msg>) {
     }
 }
 
+/// Télécharge (SHA-1 vérifié) et extrait un paquet du Catalogue ; refuse s'il ne vise pas l'architecture du PC.
+pub fn fetch_catalog_package(agent: &ureq::Agent, id: &str) -> Result<PathBuf, String> {
+    let dir = std::env::temp_dir().join("mesdrivers").join(id);
+    let _ = std::fs::remove_dir_all(&dir);
+    let cab = crate::catalog::download(agent, id, &dir)?;
+    let out = dir.join("pilote");
+    crate::pnputil::expand_cab(&cab, &out)?;
+    if !crate::pnputil::has_inf_for_this_arch(&out) {
+        return Err("ce paquet ne contient pas de pilote pour l'architecture de ce PC".into());
+    }
+    Ok(out)
+}
+
+fn backup_report(dir: &std::path::Path) -> String {
+    let infs = crate::pnputil::files(dir).iter().filter(|f| f.extension().is_some_and(|e| e.eq_ignore_ascii_case("inf"))).count();
+    format!("{infs} pilote(s) exporté(s) ({}) dans {}", crate::model::human_size(crate::pnputil::dir_size(dir)), dir.display())
+}
+
+fn today() -> String {
+    let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    crate::model::stamp(secs)[..10].to_string()
+}
+
+/// Dossier proposé pour une sauvegarde : Bureau\Pilotes-<PC>-<date>.
+pub fn default_backup_dir() -> PathBuf {
+    let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")).map(PathBuf::from).unwrap_or_default();
+    let desk = home.join("Desktop");
+    let base = if desk.is_dir() { desk } else { home };
+    let pc = std::env::var("COMPUTERNAME").unwrap_or_else(|_| "PC".into());
+    base.join(format!("Pilotes-{pc}-{}", today()))
+}
+
 #[cfg(not(windows))]
 fn run(rx: Receiver<Cmd>, tx: Sender<Msg>) {
-    for _ in rx {
-        let _ = tx.send(Msg::Error("Cette application ne fonctionne que sous Windows.".into()));
+    for cmd in rx {
+        let msg = match cmd {
+            Cmd::SelfUpdate(tag) => crate::selfupdate::apply(&crate::catalog::agent(), &tag).unwrap_or_else(|e| e),
+            _ => "Cette application ne fonctionne que sous Windows.".into(),
+        };
+        let _ = tx.send(Msg::Status(msg));
         let _ = tx.send(Msg::Done);
     }
 }
 
-#[cfg(not(windows))]
-pub fn cli_scan() -> i32 {
-    eprintln!("--scan ne fonctionne que sous Windows.");
-    1
-}
-
 #[cfg(windows)]
-fn com_init() -> windows::core::Result<()> {
+pub fn com_init() -> windows::core::Result<()> {
     use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx};
     unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }.ok()
 }
 
 #[cfg(windows)]
-fn restore_point() -> Result<(), String> {
+pub fn restore_point() -> Result<(), String> {
     let out = std::process::Command::new("powershell")
         .args([
             "-NoProfile",
@@ -90,144 +136,179 @@ fn restore_point() -> Result<(), String> {
     Err(err.lines().find(|l| !l.trim().is_empty()).unwrap_or("échec inconnu").trim().to_string())
 }
 
+/// Inventaire + résumé + DriverStore (thread WMI), Catalogue en tâche de fond.
+#[cfg(windows)]
+fn inventory_job(tx: Sender<Msg>, with_summary: bool) {
+    let con = match wmi::WMIConnection::new() {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = tx.send(Msg::Status(format!("Inventaire WMI : {e}")));
+            return;
+        }
+    };
+    match crate::inventory::scan(&con) {
+        Ok((mut d, b)) => {
+            check_catalog(&mut d, &tx);
+            let in_use: Vec<String> = d.iter().map(|x| x.inf.clone()).collect();
+            let _ = tx.send(Msg::Inventory(d, b));
+            if with_summary {
+                let _ = tx.send(Msg::Summary(crate::system::summary(&con)));
+            }
+            let _ = tx.send(Msg::Store(crate::store::scan(&in_use)));
+        }
+        Err(e) => {
+            let _ = tx.send(Msg::Status(format!("Inventaire WMI : {e}")));
+        }
+    }
+}
+
 #[cfg(windows)]
 fn run(rx: Receiver<Cmd>, tx: Sender<Msg>) {
     use crate::wu::Wu;
     // Les objets COM (IUpdate) ne sont pas Send : Windows Update reste dans ce thread.
     let mut wu = match com_init().and_then(|_| Wu::new()) {
-        Ok(w) => w,
+        Ok(w) => Some(w),
         Err(e) => {
-            let _ = tx.send(Msg::Error(format!("Windows Update indisponible : {e}")));
-            let _ = tx.send(Msg::Done);
-            return;
+            let _ = tx.send(Msg::Status(format!("Windows Update indisponible : {e}")));
+            None
         }
     };
-    let search = |wu: &mut Wu| {
-        let _ = tx.send(match wu.search() {
-            Ok(u) => Msg::Updates(u),
-            Err(e) => Msg::Error(format!("Recherche Windows Update : {e}")),
-        });
+    let agent = crate::catalog::agent();
+    let say = |s: String| {
+        let _ = tx.send(Msg::Progress(s));
     };
+    // WMI dans son propre thread pendant que Windows Update cherche : durée = max des deux.
+    let scan = |wu: &mut Option<Wu>, summary: bool| {
+        let inv_tx = tx.clone();
+        let inv = std::thread::spawn(move || inventory_job(inv_tx, summary));
+        if let Some(w) = wu.as_mut() {
+            let _ = tx.send(match w.search() {
+                Ok(u) => Msg::Updates(u),
+                Err(e) => Msg::Status(format!("Recherche Windows Update : {e}")),
+            });
+        }
+        let _ = inv.join();
+    };
+    let journal = |line: String| {
+        if let Err(e) = crate::journal::log(&line) {
+            let _ = tx.send(Msg::Status(format!("Journal non écrit : {e}")));
+        }
+    };
+    let mut first = true;
 
     for cmd in rx {
         match cmd {
             Cmd::Scan => {
-                // WMI dans son propre thread pendant que Windows Update cherche : durée = max des deux.
-                let inv_tx = tx.clone();
-                let inv = std::thread::spawn(move || {
-                    let r = wmi::WMIConnection::new().and_then(|c| crate::inventory::scan(&c));
-                    match r {
-                        Ok((mut d, b)) => {
-                            check_catalog(&mut d, &inv_tx);
-                            let _ = inv_tx.send(Msg::Inventory(d, b));
-                        }
-                        Err(e) => {
-                            let _ = inv_tx.send(Msg::Error(format!("Inventaire WMI : {e}")));
-                        }
-                    }
-                });
-                search(&mut wu);
-                if inv.join().is_err() {
-                    let _ = tx.send(Msg::Error("Inventaire WMI : erreur interne".into()));
-                }
+                scan(&mut wu, first);
+                first = false;
             }
-            Cmd::Install { picks, skip_restore } => {
+            Cmd::Install { wu: picks, catalog, skip_restore } => {
                 if !skip_restore {
-                    let _ = tx.send(Msg::Progress("Création du point de restauration…".into()));
+                    say("Création du point de restauration…".into());
                     if let Err(e) = restore_point() {
-                        let _ = tx.send(Msg::NeedForce(e));
+                        let retry = Cmd::Install { wu: picks.clone(), catalog: catalog.clone(), skip_restore: true };
+                        let _ = tx.send(Msg::NeedForce(e, retry));
                         let _ = tx.send(Msg::Done);
                         continue;
                     }
                 }
-                let n = picks.len();
-                let (mut ok, mut reboot, mut errors) = (0, false, Vec::new());
-                for (k, &i) in picks.iter().enumerate() {
-                    let title = wu.title(i);
-                    let _ = tx.send(Msg::Progress(format!("{}/{n} : {title}…", k + 1)));
-                    let line = match wu.install_one(i) {
+                let n = picks.len() + catalog.len();
+                let (mut ok, mut reboot, mut k) = (0, false, 0);
+                for &i in &picks {
+                    k += 1;
+                    let Some(w) = wu.as_ref() else { break };
+                    let title = w.title(i);
+                    say(format!("{k}/{n} : {title} (Windows Update)…"));
+                    journal(match w.install_one(i) {
                         Ok((true, r)) => {
                             ok += 1;
                             reboot |= r;
-                            format!("OK      {title}")
+                            format!("OK      WU         {title}")
                         }
-                        Ok((false, _)) => format!("ÉCHEC   {title}"),
-                        Err(e) => format!("ERREUR  {title} : {e}"),
-                    };
-                    if let Err(e) = crate::journal::log(&line) {
-                        errors.push(format!("journal : {e}"));
+                        Ok((false, _)) => format!("ÉCHEC   WU         {title}"),
+                        Err(e) => format!("ERREUR  WU         {title} : {e}"),
+                    });
+                }
+                for (id, title) in &catalog {
+                    k += 1;
+                    say(format!("{k}/{n} : {title} (Catalogue : téléchargement)…"));
+                    let r = fetch_catalog_package(&agent, id).and_then(|dir| {
+                        say(format!("{k}/{n} : {title} (installation)…"));
+                        crate::pnputil::add_dir(&dir)
+                    });
+                    let _ = std::fs::remove_dir_all(std::env::temp_dir().join("mesdrivers").join(id));
+                    journal(match r {
+                        Ok(r) => {
+                            ok += 1;
+                            reboot |= r;
+                            format!("OK      Catalogue  {title}")
+                        }
+                        Err(e) => format!("ERREUR  Catalogue  {title} : {e}"),
+                    });
+                }
+                let mut s = format!("{ok}/{n} pilote(s) installé(s). Détails : {}", crate::journal::path().display());
+                if reboot {
+                    s = format!("Redémarrage nécessaire. {s}");
+                }
+                let _ = tx.send(Msg::Status(s));
+                scan(&mut wu, false); // les versions ont changé
+            }
+            Cmd::Backup(dir) => {
+                say(format!("Export des pilotes vers {}…", dir.display()));
+                let s = match crate::pnputil::export_all(&dir) {
+                    Ok(()) => backup_report(&dir),
+                    Err(e) => format!("Export échoué : {e}"),
+                };
+                journal(format!("EXPORT  {s}"));
+                let _ = tx.send(Msg::Status(s));
+            }
+            Cmd::Restore { dir, skip_restore } => {
+                if !skip_restore {
+                    say("Création du point de restauration…".into());
+                    if let Err(e) = restore_point() {
+                        let _ = tx.send(Msg::NeedForce(e, Cmd::Restore { dir, skip_restore: true }));
+                        let _ = tx.send(Msg::Done);
+                        continue;
                     }
                 }
-                let mut s = format!("{ok}/{n} pilote(s) installé(s).");
-                if reboot {
-                    s += " Redémarrage nécessaire.";
+                say(format!("Installation des pilotes de {}…", dir.display()));
+                let s = match crate::pnputil::add_dir(&dir) {
+                    Ok(true) => "Pilotes restaurés. Redémarrage nécessaire.".to_string(),
+                    Ok(false) => "Pilotes restaurés.".to_string(),
+                    Err(e) => format!("Restauration : {e}"),
+                };
+                journal(format!("RESTAURATION {} : {s}", dir.display()));
+                let _ = tx.send(Msg::Status(s));
+                scan(&mut wu, false);
+            }
+            Cmd::DeletePackages(oems) => {
+                let (mut ok, mut errs) = (0, Vec::new());
+                for (k, oem) in oems.iter().enumerate() {
+                    say(format!("{}/{} : suppression de {oem}…", k + 1, oems.len()));
+                    match crate::pnputil::delete(oem) {
+                        Ok(()) => {
+                            ok += 1;
+                            journal(format!("SUPPR   {oem}"));
+                        }
+                        Err(e) => {
+                            journal(format!("REFUS   {e}"));
+                            errs.push(e);
+                        }
+                    }
                 }
-                if !errors.is_empty() {
-                    s += &format!(" ({})", errors[0]);
+                let mut s = format!("{ok}/{} paquet(s) supprimé(s) du DriverStore.", oems.len());
+                if let Some(e) = errs.first() {
+                    s += &format!(" Refusé : {e}");
                 }
-                let _ = tx.send(Msg::Installed(s));
-                search(&mut wu); // la liste change après installation
+                let _ = tx.send(Msg::Status(s));
+                let inv_tx = tx.clone();
+                let _ = std::thread::spawn(move || inventory_job(inv_tx, false)).join();
+            }
+            Cmd::SelfUpdate(tag) => {
+                say(format!("Téléchargement de {tag}…"));
+                let _ = tx.send(Msg::Status(crate::selfupdate::apply(&agent, &tag).unwrap_or_else(|e| e)));
             }
         }
         let _ = tx.send(Msg::Done);
     }
-}
-
-/// `mesdrivers --scan` : tout le moteur sans interface, avec les durées. Sert de test réel en CI.
-#[cfg(windows)]
-pub fn cli_scan() -> i32 {
-    use std::time::Instant;
-    let mut code = 0;
-    let t = Instant::now();
-    let inv = std::thread::spawn(|| {
-        let t = Instant::now();
-        let r = wmi::WMIConnection::new().and_then(|c| crate::inventory::scan(&c)).map_err(|e| e.to_string());
-        (r, t.elapsed())
-    });
-    let wu_t = Instant::now();
-    let wu = com_init().and_then(|_| crate::wu::Wu::new()).and_then(|mut w| w.search());
-    let wu_t = wu_t.elapsed();
-    let (inv, inv_t) = inv.join().unwrap_or((Err("thread WMI planté".into()), Default::default()));
-
-    let mut devices = match inv {
-        Ok((d, b)) => {
-            println!("== Inventaire WMI : {} pilotes, {} en erreur ({inv_t:.1?})", d.len(), b.len());
-            for x in &b {
-                println!("  ! {} (code {} : {})", x.name, x.code, crate::model::error_label(x.code));
-            }
-            for x in d.iter().filter(|x| !x.provider.eq_ignore_ascii_case("Microsoft")) {
-                println!("  {} | {} | {} | {}", x.name, x.provider, x.version, x.date);
-            }
-            d
-        }
-        Err(e) => {
-            println!("== Inventaire WMI : ERREUR {e}");
-            code = 1;
-            Vec::new()
-        }
-    };
-    match wu {
-        Ok(u) => {
-            println!("== Windows Update : {} pilote(s) proposé(s) ({wu_t:.1?})", u.len());
-            for x in &u {
-                println!("  {} | {} | {}", x.title, x.hwid, x.date);
-            }
-        }
-        Err(e) => {
-            println!("== Windows Update : ERREUR {e}");
-            code = 1;
-        }
-    }
-
-    let cat_t = Instant::now();
-    let (tx, rx) = channel();
-    check_catalog(&mut devices, &tx);
-    drop(tx);
-    let results: Vec<(String, Catalog)> = rx.into_iter().filter_map(|m| if let Msg::Catalog(h, c) = m { Some((h, c)) } else { None }).collect();
-    println!("== Catalogue Microsoft : {} matériel(s) vérifié(s) ({:.1?})", results.len(), cat_t.elapsed());
-    for (h, c) in &results {
-        println!("  {h} -> {c:?}");
-    }
-    println!("== Total {:.1?}", t.elapsed());
-    code
 }

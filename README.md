@@ -1,8 +1,15 @@
 # MesDrivers
 
-Détecte le matériel Windows, liste les pilotes installés et les périphériques en erreur, puis propose et installe les pilotes plus récents de **Windows Update** (sources officielles, signées Microsoft). Interface TUI dans le terminal.
+Outil de gestion des pilotes Windows dans le terminal (TUI). Il remplace « Mes Drivers » de TousLesDrivers, figé depuis 2016 :
 
-Chaque pilote tiers est aussi vérifié dans le **Catalogue Microsoft Update**, qui a souvent des versions plus récentes que celles poussées par Windows Update (colonne « Catalogue MS », `o` pour ouvrir la page).
+- **Résumé** du PC : Windows, CPU, RAM, carte mère, BIOS, cartes graphiques, disques.
+- **Matériel** : tous les pilotes installés, les périphériques en erreur en rouge.
+- **Mises à jour** depuis deux sources officielles et signées :
+  - **Windows Update** ;
+  - **Catalogue Microsoft Update**, souvent plus récent : .cab vérifié par SHA-1, contrôle de l'architecture, installation via `pnputil`.
+- **DriverStore** : repère les anciennes versions de pilotes qui prennent de la place (souvent plusieurs Go) et les supprime sans risque.
+- **Sauvegarde / restauration** de tous les pilotes, idéal avant de réinstaller Windows.
+- **Mise à jour automatique** de MesDrivers depuis GitHub (exe vérifié par SHA-256).
 
 ## Installation (PowerShell)
 
@@ -11,38 +18,44 @@ irm https://github.com/PhilDaiguille/mesdrivers/releases/latest/download/mesdriv
 & $env:USERPROFILE\mesdrivers.exe
 ```
 
-Windows demande les droits administrateur au lancement (nécessaires pour installer un pilote).
+Windows demande les droits administrateur au lancement (nécessaires pour installer ou supprimer un pilote).
 
 ## Sécurité
 
-- Un point de restauration Windows est créé avant chaque installation. S'il échoue (protection système désactivée), l'appli demande confirmation.
-- Les pilotes sont installés un par un, avec la progression affichée.
-- Chaque installation est notée dans `%LOCALAPPDATA%\mesdrivers\journal.txt`.
+- Point de restauration Windows créé avant chaque installation ou restauration. S'il échoue, l'appli demande confirmation.
+- Pilotes installés un par un, avec la progression affichée. Windows refuse de lui-même un pilote non signé.
+- DriverStore : seuls les paquets **inutilisés et remplacés par une version plus récente en service** sont proposés. La suppression se fait sans `/force`, donc Windows refuse un pilote encore utilisé.
+- Chaque action est notée dans `%LOCALAPPDATA%\mesdrivers\journal.txt`.
 
 ## Touches
 
 | Touche | Action |
 |---|---|
-| `Tab` | changer d'onglet |
+| `Tab` / `1`–`5` | changer d'onglet |
 | `↑↓` `PgUp/PgDn` | naviguer |
 | `/` | filtrer (Échap efface) |
+| `Espace` / `a` | cocher / tout cocher |
+| `i` | installer les mises à jour cochées |
+| `d` | supprimer les paquets DriverStore cochés |
+| `Entrée` | lancer une sauvegarde / restauration |
 | `m` | afficher/masquer les pilotes génériques Microsoft |
 | `o` | ouvrir le Catalogue Microsoft pour la ligne sélectionnée |
-| `Espace` / `a` | cocher / tout cocher (onglet Mises à jour) |
-| `i` | installer la sélection |
 | `r` | rescanner |
+| `U` | mettre à jour MesDrivers |
 | `q` | quitter |
 
 ## Ligne de commande
 
 ```powershell
-mesdrivers --scan                              # analyse complète sans interface, avec les durées
-mesdrivers --catalog "PCI\VEN_8086&DEV_51F1"   # dernière version publiée au Catalogue
-mesdrivers --version
+mesdrivers --scan                                        # analyse complète sans interface, avec les durées
+mesdrivers --catalog "PCI\VEN_8086&DEV_51F1"             # dernière version publiée au Catalogue
+mesdrivers --catalog-get "PCI\VEN_8086&DEV_51F1" C:\tmp  # télécharge + vérifie + extrait, sans installer
+mesdrivers --backup D:\Pilotes                           # exporte tous les pilotes tiers
+mesdrivers --restore D:\Pilotes                          # réinstalle une sauvegarde
 ```
 
 ## Publier une version
 
 ```sh
-git tag v0.2.0 && git push --tags   # GitHub Actions teste, compile et attache mesdrivers.exe à la release
+git tag v0.3.0 && git push --tags   # la CI teste (dont des tests réels sur Windows), compile et publie l'exe + son .sha256
 ```

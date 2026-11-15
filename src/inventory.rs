@@ -12,6 +12,7 @@ struct SignedDriver {
     driver_date: Option<String>,
     #[serde(rename = "HardWareID")]
     hardware_id: Option<String>,
+    inf_name: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -33,6 +34,7 @@ pub fn scan(con: &WMIConnection) -> Result<(Vec<Device>, Vec<BrokenDevice>), wmi
                 version: d.driver_version.unwrap_or_default(),
                 date: wmi_date(d.driver_date.as_deref().unwrap_or_default()),
                 hwid: d.hardware_id.unwrap_or_default(),
+                inf: d.inf_name.unwrap_or_default(),
                 ..Default::default()
             })
         })

@@ -1,5 +1,5 @@
 //! Windows Update Agent (COM) : recherche et installation des pilotes.
-use crate::model::{Update, ole_date};
+use crate::model::{Source, Update, ole_date};
 use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance};
 use windows::Win32::System::UpdateAgent::*;
 use windows::core::{BSTR, Interface, Result};
@@ -27,6 +27,8 @@ impl Wu {
                 let u = list.get_Item(i)?;
                 let d: IWindowsDriverUpdate = u.cast()?;
                 out.push(Update {
+                    source: Source::Wu(self.found.len()),
+                    version: String::new(),
                     title: u.Title()?.to_string(),
                     provider: d.DriverProvider()?.to_string(),
                     hwid: d.DriverHardwareID()?.to_string(),
