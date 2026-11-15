@@ -54,8 +54,31 @@ mesdrivers --backup D:\Pilotes                           # exporte tous les pilo
 mesdrivers --restore D:\Pilotes                          # réinstalle une sauvegarde
 ```
 
-## Publier une version
+## Documentation
+
+- [FAQ](docs/faq.md) : dates 1968, « · N périphériques », sécurité du Catalogue, retour arrière, SmartScreen…
+- [Architecture](docs/architecture.md) : modules, threads, sources de pilotes, règles de sécurité.
+
+## Développement
 
 ```sh
-git tag v0.3.0 && git push --tags   # la CI teste (dont des tests réels sur Windows), compile et publie l'exe + son .sha256
+cargo test                          # tests unitaires (tournent aussi sur macOS/Linux)
+cargo test -- --ignored             # tests réseau réels (Catalogue Microsoft, API GitHub)
+cargo clippy --all-targets -- -D warnings
+rustup target add x86_64-pc-windows-msvc
+cargo clippy --target x86_64-pc-windows-msvc --all-targets -- -D warnings   # vérifie le code Windows depuis un Mac
 ```
+
+Chaque push lance la CI sur un vrai Windows (`windows-latest`). Elle exécute `--scan`, `--catalog-get` et `--backup` sur la machine.
+
+Publier une version : passer `version` dans `Cargo.toml`, pousser sur `main`, puis
+
+```sh
+git tag vX.Y.Z && git push origin vX.Y.Z   # la CI publie mesdrivers.exe + mesdrivers.exe.sha256
+```
+
+Les versions installées le proposent alors d'elles-mêmes (touche `U`).
+
+## Licence
+
+MIT
